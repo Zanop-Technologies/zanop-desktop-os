@@ -1,6 +1,5 @@
 #pragma once
-#include <cstdint>
-#include <cstddef>
+#include "types.hpp"
 
 // .sft file parser -- implements the header format designed earlier:
 //

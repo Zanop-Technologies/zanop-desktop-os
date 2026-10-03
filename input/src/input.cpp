@@ -1,13 +1,6 @@
 #include "input.hpp"
 #include "../../../zanop-kernel/src/drivers/keyboard.hpp"
-// NOTE: relative path assumes the sibling-folder layout (zanop-kernel,
-// zanop-desktop-os as siblings) -- same assumption as every other
-// cross-repo include in this project. Adjust if your layout differs.
-//
-// NOTE: this assumes Drivers::Keyboard:: is the real current
-// namespace -- unverified, see the header's comment above. If the
-// real keyboard.hpp uses a different namespace or signatures, only
-// the four lines below need to change.
+#include "../../../zanop-kernel/src/drivers/mouse.hpp"
 
 namespace input {
 
@@ -25,6 +18,20 @@ std::optional<char> scancode_to_ascii(std::uint8_t code) {
 
 std::optional<ArrowKey> read_arrow_key() {
     return std::nullopt;
+}
+
+std::optional<MouseEvent> try_read_mouse_event() {
+    auto event = Drivers::Mouse::try_read_event();
+    if (!event) return std::nullopt;
+    return MouseEvent{(*event).delta_x, (*event).delta_y, (*event).buttons};
+}
+
+bool mouse_available() {
+    return Drivers::Mouse::is_available();
+}
+
+std::uint8_t mouse_init_error() {
+    return Drivers::Mouse::init_error();
 }
 
 } // namespace input

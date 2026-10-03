@@ -1,126 +1,49 @@
-# Zanop Desktop OS — Build "Chicago" (September 2026)
+# Zanop Desktop OS
 
-The first draft of the actual GUI layer running on top of the Zanop
-Kernel. "Basic" on purpose: the kernel only has VGA text-mode output
-right now (no pixel framebuffer driver yet), so this is a **text-mode
-windowing desktop** — bordered windows drawn with line-art characters,
-a taskbar, and a numbered text launcher. No icons, because there's no
-graphics to draw them with yet. Real icon/pixel support is planned for
-a later kernel version with proper GUI support.
+The desktop uses the Multiboot2 RGB framebuffer when available and
+falls back to VGA text mode otherwise. In graphics mode, the desktop,
+launcher, windows, and built-in apps all render as pixels.
 
-## What's in this build
+## Desktop and Apps
 
-- **Desktop background** — a light dither pattern fill (the closest
-  thing to "wallpaper" in text mode)
-- **Top bar** — build name + a live clock (reads the kernel's CMOS RTC)
-- **Bottom bar** — a `[ Start ]` label and the title of the focused window
-- **Start Menu** — press `S` to open it. A plain numbered list of the
-  kernel's built-in apps (Calculator, Notes, Clock, Snake) — press the
-  number shown to launch, `Esc` to close the menu without launching
-  anything
-- **Windows** — bordered boxes with a title bar, drawn via the
-  compositor. Currently only the Start Menu is rendered as a real
-  window; launched apps take over the full screen for now (see
-  "Known limitations" below)
+  to return or close.
+  in-memory filesystem when you press Esc.
+- Files lists stored files and previews readable text files; use `J`/`K`
+  or `W`/`S` to select and Enter to preview.
+- Settings switches the desktop background between Ocean and Ember for
+  the current session.
+  restart, and Esc to return.
 
-## Repo layout
+## Build
 
-```
-zanop-desktop-os/
-├── compositor/     # text-mode window manager (surface.rs, window.rs, mod.rs)
-├── shell/          # desktop.rs (background), taskbar.rs, launcher.rs, mod.rs
-├── input/          # thin wrapper around the kernel's keyboard driver
-├── loader/         # unchanged from the earlier .sft draft
-├── sft-tools/       # unchanged from the earlier .sft draft
-└── kernel-patch/    # NOT part of the workspace — apply this to zanop-kernel first
+- Only the Barks Maximum profile is offered. It requires 1.5 GB of usable RAM and 5 GB of disk capacity; 8 GB is recommended.
+- A terminal or command shell is not included yet.
 ```
 
-## Required: apply the kernel patch first
+Create a bootable ISO with:
 
-This build depends on `zanop-kernel` as a **library**, not just a
-binary, so it can reuse the kernel's already-fixed VGA writer and
-interrupt-driven keyboard input instead of duplicating that code (and
-duplicating its bugs). The kernel repo doesn't expose itself as a
-library yet, so:
-
-1. Open `kernel-patch/APPLY_PATCH.txt` and follow its 4 steps in your
-   `zanop-kernel` repo (adds `src/lib.rs`, a `[lib]` section in
-   `Cargo.toml`, and makes a few modules `pub`)
-2. Open `kernel-patch/VGA_PATCH.txt` and add the `put_at()` method it
-   describes to `zanop-kernel/src/drivers/vga.rs` — the compositor
-   needs this to draw windows without disturbing the shell's own
-   cursor position
-
-Both patches are additive only — they don't change any existing
-kernel behavior from v0.0.4.
-
-## Required: wire the kernel to boot into this shell
-
-In `zanop-kernel/src/main.rs`, change the line that currently calls
-the plain-text shell:
-
-```rust
-// before:
-shell::run()
-
-// after:
-zanop_desktop_shell::run()
+```sh
+make iso
 ```
 
-You'll also need to add `zanop-desktop-shell` as a dependency in the
-kernel's `Cargo.toml` `[[bin]]` build — this creates a small circular
-relationship (kernel binary depends on a crate that depends on the
-kernel library), which Cargo handles fine, but is worth knowing about
-if it looks unusual.
+The ISO is written to `~/Downloads/zanop-desktop-os.iso`. Limine boot
+assets are taken from `../Limine` when present, or from
+`build/iso/boot/limine`; otherwise the Makefile uses GRUB tooling. The
+build also requires `grub-mkrescue` to create the hybrid disk image
+embedded in the installer ISO.
 
-## Folder path assumption
+## VirtualBox
 
-`Cargo.toml`'s `zanop-kernel` dependency uses `path = "../zanop-kernel"`,
-which assumes both repos sit as sibling folders (e.g. both under
-`~/Projects/`). Adjust that path if your layout differs.
+Create or use an x86_64 VM, attach `zanop-desktop-os.iso` as its optical
+disk, and boot from the optical drive. The kernel requests an optional
+800x600x32 framebuffer; the desktop uses the actual mode returned by
+the bootloader. The host must have the VirtualBox `vboxdrv` module
+loaded before the VM can start.
 
-## Building sft-tools (needs a target override)
+## Current Limits
 
-`.cargo/config.toml` at the workspace root defaults every crate to the
-freestanding kernel target — correct for everything except
-`sft-tools`, which is a normal host binary (runs on your dev machine
-to package `.sft` files, not on the kernel itself). Build it with an
-explicit override to your actual host target, e.g.:
-
-```bash
-cargo build -p sft-tools --target x86_64-unknown-linux-gnu
-```
-
-(swap the target triple for whatever matches your machine — check
-with `rustc -vV` if unsure).
-
-## Known limitations (honest, not hedging)
-
-- **No compiled/boot test yet** — same sandbox limitation as every
-  kernel build so far: no Rust/NASM/QEMU toolchain here, so this is
-  correct by inspection, not by an actual successful build.
-- **Launched apps take over the whole screen** rather than living in
-  their own window — Calculator/Notes/Clock/Snake still print through
-  the shared VGA writer directly, same as they did before this GUI
-  layer existed. A real "windowed app host" that redirects an app's
-  output into a bounded window region is the natural next step, but
-  it's a real chunk of work (needs a virtual/clipped writer), so it's
-  deliberately not attempted in this first draft.
-- **No arrow-key navigation** — arrow keys send an `0xE0`-prefixed
-  extended scancode that nothing in the kernel's keyboard driver
-  decodes yet (see `input/src/mod.rs`'s `read_arrow_key()` stub, which
-  always returns `None` on purpose rather than pretending to work).
-  Number-key selection in the Start Menu is the workaround for now.
-- **No mouse support** — there's no mouse driver in the kernel at all
-  yet, so everything here is keyboard-only by necessity, not choice.
-- **Single-window focus model** — the compositor is a simple stack
-  (last opened = focused), no click-to-focus, no window dragging, no
-  overlapping window management beyond draw order.
-
-## Next Milestone
-
-Get the kernel patches applied and an actual boot test done, then
-tackle either: (a) a real windowed app host so launched apps render
-inside a bounded region instead of taking the full screen, or (b)
-0xE0 extended scancode handling to unlock arrow-key navigation —
-whichever matters more for how you want the Start Menu to feel.
+- Input is keyboard-only; there is no mouse driver yet.
+- Notes are saved as `note.txt` on a mounted, formatted ATA filesystem; without one, they stay in RAM.
+- The installer writes a bootable hybrid disk image to the selected ATA disk. This overwrites the entire disk; use an empty virtual disk or a disk whose contents can be erased.
+- Snake uses WASD because extended arrow-key scancodes are not decoded.
+- The desktop currently supports one focused app window at a time.

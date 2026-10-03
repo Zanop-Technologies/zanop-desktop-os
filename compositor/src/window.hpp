@@ -1,10 +1,8 @@
 #pragma once
-#include <cstddef>
-#include <cstring>
+#include "types.hpp"
 
-// Text-mode window: a bordered box with a title bar, drawn using
-// line-drawing characters. No icons -- there's no pixel framebuffer
-// yet, so every visual element here is a character.
+// Pixel window when a framebuffer is available, with a VGA text-mode
+// fallback for boot configurations that do not provide one.
 
 namespace compositor {
 

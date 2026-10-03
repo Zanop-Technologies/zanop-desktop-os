@@ -1,11 +1,9 @@
 #pragma once
 
-// The real (non-mockup) Windows 1.01-inspired installer, adapted for
-// text-mode: bordered windows via compositor::Window, keyboard-only
-// navigation (Enter = Next, Esc = Back/Cancel), same step sequence as
-// the earlier HTML mockup -- Welcome, License, Setup Type, User Info,
-// Installing (progress), Finish.
+#include "../../../zanop-kernel/src/types.hpp"
 
 namespace installer {
-void run();
+void set_system_memory(std::uint64_t bytes);
+void set_boot_payload(const std::uint8_t* data, std::size_t size);
+void run_graphical();
 }
