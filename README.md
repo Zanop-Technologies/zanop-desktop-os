@@ -16,7 +16,7 @@ launcher, windows, and built-in apps all render as pixels.
 
 ## Build
 
-- Only the Barks Maximum profile is offered. It requires 1.5 GB of usable RAM and 5 GB of disk capacity; 8 GB is recommended.
+- Barks Lite requires 250 MB of RAM and 590 MB of storage. Barks Maximum requires 1 GB of RAM and 1.7 GB of storage.
 - A terminal or command shell is not included yet.
 ```
 
@@ -34,16 +34,41 @@ embedded in the installer ISO.
 
 ## VirtualBox
 
-Create or use an x86_64 VM, attach `zanop-desktop-os.iso` as its optical
-disk, and boot from the optical drive. The kernel requests an optional
-800x600x32 framebuffer; the desktop uses the actual mode returned by
-the bootloader. The host must have the VirtualBox `vboxdrv` module
-loaded before the VM can start.
+Create an x86_64 VM, attach `zanop-desktop-os.iso` as its optical disk,
+and boot from the optical drive. The installer can format a selected
+ATA target after explicit confirmation; formatting erases that target.
+Use a disposable virtual disk for testing.
 
 ## Current Limits
 
-- Input is keyboard-only; there is no mouse driver yet.
-- Notes are saved as `note.txt` on a mounted, formatted ATA filesystem; without one, they stay in RAM.
-- The installer writes a bootable hybrid disk image to the selected ATA disk. This overwrites the entire disk; use an empty virtual disk or a disk whose contents can be erased.
+- PS/2 mouse input supports pointer movement and desktop clicks.
+- Notes persist on a formatted ATA filesystem; without one, they stay in RAM.
 - Snake uses WASD because extended arrow-key scancodes are not decoded.
 - The desktop currently supports one focused app window at a time.
+
+## System Folder
+
+```text
+/
+├── system/
+│   ├── commands
+│   ├── programs
+│   ├── icons
+│   ├── fonts
+│   └── engine
+├── temp
+├── mnt
+├── external
+└── home/
+  ├── Desktop
+  ├── Documents
+  ├── Videos
+  └── Music
+```
+
+The System folder is protected from deletion.
+
+## Next Milestone
+
+Continue validating the installer and persistent filesystem against a
+disposable VHD before using any physical disk target.
