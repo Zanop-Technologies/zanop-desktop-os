@@ -117,6 +117,26 @@ with `rustc -vV` if unsure).
   (last opened = focused), no click-to-focus, no window dragging, no
   overlapping window management beyond draw order.
 
+## System Folder
+```text
+/
+├── system/
+│   ├── commands
+│   ├── programs
+│   ├── icons
+│   ├── fonts
+│   └── engine
+├── temp
+├── mnt
+├── external
+└── home/
+    ├── Desktop
+    ├── Documents
+    ├── Videos
+    └── Music
+```
+System Folder cannot be deleted no matter what the command is.
+
 ## Next Milestone
 
 Get the kernel patches applied and an actual boot test done, then
