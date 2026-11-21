@@ -1,4 +1,5 @@
 #include "surface.hpp"
+#include "embedded_fonts.hpp"
 #include "../../../zanop-kernel/src/drivers/vga.hpp"
 #include "../../../zanop-kernel/src/framebuffer/framebuffer.hpp"
 // NOTE: relative path above assumes zanop-desktop-os and zanop-kernel
@@ -17,58 +18,35 @@ namespace surface {
 
 namespace {
 
-constexpr std::uint8_t FONT[36][5] = {
-    {0x3e, 0x51, 0x49, 0x45, 0x3e}, {0x00, 0x42, 0x7f, 0x40, 0x00},
-    {0x42, 0x61, 0x51, 0x49, 0x46}, {0x21, 0x41, 0x45, 0x4b, 0x31},
-    {0x18, 0x14, 0x12, 0x7f, 0x10}, {0x27, 0x45, 0x45, 0x45, 0x39},
-    {0x3c, 0x4a, 0x49, 0x49, 0x30}, {0x01, 0x71, 0x09, 0x05, 0x03},
-    {0x36, 0x49, 0x49, 0x49, 0x36}, {0x06, 0x49, 0x49, 0x29, 0x1e},
-    {0x7e, 0x11, 0x11, 0x11, 0x7e}, {0x7f, 0x49, 0x49, 0x49, 0x36},
-    {0x3e, 0x41, 0x41, 0x41, 0x22}, {0x7f, 0x41, 0x41, 0x22, 0x1c},
-    {0x7f, 0x49, 0x49, 0x49, 0x41}, {0x7f, 0x09, 0x09, 0x09, 0x01},
-    {0x3e, 0x41, 0x49, 0x49, 0x7a}, {0x7f, 0x08, 0x08, 0x08, 0x7f},
-    {0x00, 0x41, 0x7f, 0x41, 0x00}, {0x20, 0x40, 0x41, 0x3f, 0x01},
-    {0x7f, 0x08, 0x14, 0x22, 0x41}, {0x7f, 0x40, 0x40, 0x40, 0x40},
-    {0x7f, 0x02, 0x0c, 0x02, 0x7f}, {0x7f, 0x04, 0x08, 0x10, 0x7f},
-    {0x3e, 0x41, 0x41, 0x41, 0x3e}, {0x7f, 0x09, 0x09, 0x09, 0x06},
-    {0x3e, 0x41, 0x51, 0x21, 0x5e}, {0x7f, 0x09, 0x19, 0x29, 0x46},
-    {0x46, 0x49, 0x49, 0x49, 0x31}, {0x01, 0x01, 0x7f, 0x01, 0x01},
-    {0x3f, 0x40, 0x40, 0x40, 0x3f}, {0x1f, 0x20, 0x40, 0x20, 0x1f},
-    {0x3f, 0x40, 0x38, 0x40, 0x3f}, {0x63, 0x14, 0x08, 0x14, 0x63},
-    {0x07, 0x08, 0x70, 0x08, 0x07}, {0x61, 0x51, 0x49, 0x45, 0x43}
-};
+const std::uint8_t* glyph_for(Font font, char character) {
+    using Glyph = const std::uint8_t*;
+    Glyph table = nullptr;
+    switch (font) {
+        case Font::Ui:       table = reinterpret_cast<Glyph>(fonts::Ubuntu);      break;
+        case Font::Terminal: table = reinterpret_cast<Glyph>(fonts::UbuntuMono);  break;
+        case Font::Wobbly:   table = reinterpret_cast<Glyph>(fonts::WobblyDoodle); break;
+        case Font::Mono:     table = reinterpret_cast<Glyph>(fonts::SpaceMono);   break;
+    }
 
-const std::uint8_t* glyph_for(char character) {
-    static constexpr std::uint8_t blank[5] = {};
-    static constexpr std::uint8_t dash[5] = {0x08, 0x08, 0x08, 0x08, 0x08};
-    static constexpr std::uint8_t colon[5] = {0x00, 0x36, 0x36, 0x00, 0x00};
-    static constexpr std::uint8_t period[5] = {0x00, 0x60, 0x60, 0x00, 0x00};
-    static constexpr std::uint8_t slash[5] = {0x20, 0x10, 0x08, 0x04, 0x02};
-    static constexpr std::uint8_t plus[5] = {0x08, 0x08, 0x3e, 0x08, 0x08};
-    static constexpr std::uint8_t star[5] = {0x14, 0x08, 0x3e, 0x08, 0x14};
-    static constexpr std::uint8_t equals[5] = {0x14, 0x14, 0x14, 0x14, 0x14};
-    static constexpr std::uint8_t underscore[5] = {0x40, 0x40, 0x40, 0x40, 0x40};
-    static constexpr std::uint8_t bang[5] = {0x00, 0x00, 0x5f, 0x00, 0x00};
-    static constexpr std::uint8_t question[5] = {0x02, 0x01, 0x51, 0x09, 0x06};
-    static constexpr std::uint8_t comma[5] = {0x00, 0x60, 0x38, 0x00, 0x00};
-    if (character >= 'a' && character <= 'z') character -= 'a' - 'A';
-    if (character >= '0' && character <= '9') return FONT[character - '0'];
-    if (character >= 'A' && character <= 'Z') return FONT[10 + character - 'A'];
-    if (character == '-') return dash;
-    if (character == ':') return colon;
-    if (character == '.') return period;
-    if (character == '/') return slash;
-    if (character == '+') return plus;
-    if (character == '*') return star;
-    if (character == '=') return equals;
-    if (character == '_') return underscore;
-    if (character == '!') return bang;
-    if (character == '?') return question;
-    if (character == ',') return comma;
-    return blank;
+    // Only ASCII is baked in; anything outside that renders as blank rather
+    // than indexing off the end of the table.
+    const unsigned char code = static_cast<unsigned char>(character);
+    if (code < fonts::FIRST_GLYPH || code >= fonts::FIRST_GLYPH + fonts::GLYPH_COUNT) {
+        static constexpr std::uint8_t blank[fonts::GLYPH_WIDTH] = {};
+        return blank;
+    }
+    return table + (code - fonts::FIRST_GLYPH) * fonts::GLYPH_WIDTH;
 }
 
 } // namespace
+
+void present() {
+    Framebuffer::present();
+}
+
+bool double_buffered() {
+    return Framebuffer::is_double_buffered();
+}
 
 bool graphics_available() {
     return Framebuffer::is_available();
@@ -121,16 +99,43 @@ void draw_rgb_bitmap(std::size_t x, std::size_t y, std::size_t width,
 }
 
 void draw_text(std::size_t x, std::size_t y, const char* text, Color color,
-               std::size_t scale) {
+               std::size_t scale, Font font) {
     if (!graphics_available() || text == nullptr || scale == 0) return;
+    // Fully off-screen (or scrolled past) text costs nothing at all. This is
+    // the common case for the window chrome, which is laid out for a fixed
+    // frame size and gets clipped by smaller modes.
+    const std::size_t limit_x = pixel_width();
+    const std::size_t limit_y = pixel_height();
+    if (x >= limit_x || y >= limit_y) return;
+    if (text_height(scale) > limit_y - y) return;
+
+    const std::size_t advance = text_advance(scale);
     for (std::size_t index = 0; text[index] != '\0'; ++index) {
-        const std::uint8_t* glyph = glyph_for(text[index]);
-        for (std::size_t column = 0; column < 5; ++column) {
-            for (std::size_t row = 0; row < 7; ++row) {
-                if ((glyph[column] & (1u << row)) != 0) {
-                    fill_pixel_rect(x + index * 6 * scale + column * scale,
-                                    y + row * scale, scale, scale, color);
+        if (index > (limit_x - x) / advance) break;
+        const std::size_t origin = x + index * advance;
+        // Past the right edge, and every following character is further
+        // right still, so the whole rest of the string can be skipped.
+        if (origin >= limit_x) break;
+        const std::uint8_t* glyph = glyph_for(font, text[index]);
+        for (std::size_t row = 0; row < fonts::GLYPH_HEIGHT; ++row) {
+            // Merge horizontal runs of lit pixels into a single span. A
+            // typical glyph run is only 2-4 pixels wide, so this replaces
+            // dozens of tiny scale-by-scale rectangles with a handful of
+            // spans -- and each span is now a straight word-wide store.
+            std::size_t column = 0;
+            while (column < fonts::GLYPH_WIDTH) {
+                if ((glyph[column] & (1u << row)) == 0) {
+                    ++column;
+                    continue;
                 }
+                std::size_t run = 1;
+                while (column + run < fonts::GLYPH_WIDTH &&
+                       (glyph[column + run] & (1u << row)) != 0) {
+                    ++run;
+                }
+                fill_pixel_rect(origin + column * scale, y + row * scale,
+                                run * scale, scale, color);
+                column += run;
             }
         }
     }

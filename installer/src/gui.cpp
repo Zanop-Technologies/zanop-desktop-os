@@ -34,6 +34,14 @@ int cursor_x = 32;
 int cursor_y = 32;
 bool cursor_visible = false;
 std::uint32_t cursor_underlay[CURSOR_WIDTH * CURSOR_HEIGHT];
+std::uint64_t system_memory_bytes = 0;
+const std::uint8_t* boot_payload_data = nullptr;
+std::size_t boot_payload_size = 0;
+
+bool memory_sufficient() {
+    const std::uint64_t required = maximum ? 1000000000ull : 250000000ull;
+    return system_memory_bytes >= required;
+}
 
 bool inside(int x, int y, int left, int top, int width, int height) {
     return x >= left && y >= top && x < left + width && y < top + height;
@@ -56,7 +64,7 @@ void draw_simple_page(std::size_t width, std::size_t height) {
     surface::fill_pixel_rect(panel_x, panel_y, panel_width, height - 194, WHITE);
 
     if (page == Page::Welcome) {
-        surface::draw_text(panel_x + 40, panel_y + 38, "WELCOME", INK, 3);
+        surface::draw_text(panel_x + 40, panel_y + 38, "WELCOME", INK, 3, surface::Font::Ui);
         surface::draw_text(panel_x + 42, panel_y + 112,
                            "SET UP YOUR ZANOP COMPUTER", MUTED, 1);
         surface::fill_pixel_rect(panel_x + 42, panel_y + 156, 8, 72, TEAL);
@@ -67,7 +75,7 @@ void draw_simple_page(std::size_t width, std::size_t height) {
         surface::draw_text(panel_x + 66, panel_y + 218,
                            "PRESS ENTER OR SELECT NEXT TO CONTINUE", MUTED, 1);
     } else {
-        surface::draw_text(panel_x + 40, panel_y + 36, "LICENSE", INK, 3);
+        surface::draw_text(panel_x + 40, panel_y + 36, "LICENSE", INK, 3, surface::Font::Ui);
         surface::draw_text(panel_x + 42, panel_y + 108,
                            "DEVELOPMENT BUILD - PROVIDED AS IS", MUTED, 1);
         surface::draw_text(panel_x + 42, panel_y + 140,
@@ -97,7 +105,7 @@ void draw_full_shell(std::size_t width, std::size_t height, const char* section)
     surface::fill_pixel_rect(0, 0, width, height, PAPER);
     surface::fill_pixel_rect(0, 0, 196, height, NAVY);
     surface::fill_pixel_rect(0, 0, 6, height, TEAL);
-    surface::draw_text(28, 24, "BARKS SETUP", WHITE, 2);
+    surface::draw_text(28, 24, "BARKS SETUP", WHITE, 2, surface::Font::Ui);
     surface::draw_text(28, 82, "INSTALL", TEAL, 1);
     surface::draw_text(28, 112, section, WHITE, 1);
     surface::fill_pixel_rect(28, 154, 140, 1, {65, 84, 96});
@@ -152,6 +160,8 @@ void draw_review(std::size_t width, std::size_t height) {
     surface::draw_text(232, 136, maximum ? "BARKS MAXIMUM GUI" : "BARKS LITE GUI", INK, 2);
     surface::draw_text(232, 190, maximum ? "MINIMUM MEMORY     1 GB RAM" : "MINIMUM MEMORY     250 MB RAM", MUTED, 1);
     surface::draw_text(232, 222, maximum ? "MINIMUM STORAGE    1.7 GB STORAGE" : "MINIMUM STORAGE    590 MB STORAGE", MUTED, 1);
+    surface::draw_text(232, 254, memory_sufficient() ? "MEMORY CHECK PASSED" : "NOT ENOUGH SYSTEM MEMORY",
+                       memory_sufficient() ? TEAL : RED, 1);
 
     surface::fill_pixel_rect(232, 280, width - 272, 112, {255, 244, 231});
     surface::fill_pixel_rect(232, 280, 5, 112, GOLD);
@@ -247,6 +257,9 @@ void draw_progress(std::size_t width, std::size_t height, std::size_t percent) {
     surface::fill_pixel_rect(232, 224, bar_width, 24, {210, 221, 220});
     surface::fill_pixel_rect(232, 224, bar_width * percent / 100, 24, TEAL);
     surface::draw_text(232, 270, percent == 0 ? "STARTING" : "WRITING DISK", INK, 1);
+    // Called on its own (not via draw_page) while formatting, so it has to
+    // present itself.
+    surface::present();
     (void)height;
 }
 
@@ -326,6 +339,9 @@ void draw_page() {
         draw_blocked(width, height);
     }
     draw_cursor();
+    // Flip the finished page out in one go -- no half-drawn installer frames,
+    // and the long FORMAT progress pass stays flicker-free.
+    surface::present();
 }
 
 bool activate_at_cursor(bool& exit_requested) {
@@ -381,6 +397,11 @@ bool activate_at_cursor(bool& exit_requested) {
             return true;
         }
         if (cursor_y >= button_y && cursor_x >= static_cast<int>(width) - 218) {
+            if (!memory_sufficient()) {
+                blocked_reason = "NOT ENOUGH SYSTEM MEMORY";
+                page = Page::Blocked;
+                return true;
+            }
             target_device = 0;
             page = Page::Target;
             return true;
@@ -492,12 +513,19 @@ bool handle_key(std::uint8_t scancode) {
         }
         return true;
     }
+    if (page == Page::Review && scancode == 0x1C) {
+        if (memory_sufficient()) page = Page::Target;
+        else {
+            blocked_reason = "NOT ENOUGH SYSTEM MEMORY";
+            page = Page::Blocked;
+        }
+        return true;
+    }
     if (page == Page::Complete && scancode == 0x1C) return false;
     if (scancode != 0x1C) return false;
     if (page == Page::Welcome) page = Page::License;
     else if (page == Page::License && accepted) page = Page::Edition;
     else if (page == Page::Edition) page = Page::Review;
-    else if (page == Page::Review) page = Page::Target;
     else return false;
     return true;
 }
@@ -514,8 +542,17 @@ void format_selected_target() {
     const char* profile = maximum
         ? "BARKS MAXIMUM\nRAM=1024MB\nSTORAGE=1700MB\n"
         : "BARKS LITE\nRAM=250MB\nSTORAGE=590MB\n";
-    if (!FS::create_file("BARKS.CFG", profile)) {
+    if (!FS::create_file("/system/BARKS.CFG", profile)) {
         blocked_reason = "PROFILE FILE WRITE FAILED";
+        page = Page::Blocked;
+        draw_page();
+        return;
+    }
+
+    if (boot_payload_data != nullptr && boot_payload_size != 0 &&
+        !FS::write_file("/system/engine/zanop-kernel.payload", boot_payload_data,
+                        boot_payload_size)) {
+        blocked_reason = "KERNEL PAYLOAD WRITE FAILED";
         page = Page::Blocked;
         draw_page();
         return;
@@ -527,6 +564,15 @@ void format_selected_target() {
 }
 
 } // namespace
+
+void set_system_memory(std::uint64_t bytes) {
+    system_memory_bytes = bytes;
+}
+
+void set_boot_payload(const std::uint8_t* data, std::size_t size) {
+    boot_payload_data = data;
+    boot_payload_size = size;
+}
 
 void run_graphical() {
     if (!surface::graphics_available()) return;
@@ -565,6 +611,7 @@ void run_graphical() {
             }
             left_was_down = left_down;
             if (!redraw) draw_cursor();
+            surface::present();
         }
 
         if (redraw) draw_page();

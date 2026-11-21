@@ -43,11 +43,13 @@ def main():
 
     with open(out_path, "w") as f:
         f.write("#pragma once\n")
-        f.write("#include <cstdint>\n\n")
+        # NOTE: <cstdint> is unavailable in freestanding kernel builds;
+        # stdint.h works, and plain "unsigned char" needs no header at all.
+
         f.write("// Auto-generated from a real TTF by ttf_to_vga_font.py.\n")
         f.write("// Do not hand-edit -- regenerate from the source font instead.\n\n")
         f.write("namespace vga_font {\n\n")
-        f.write("inline const std::uint8_t SPACE_MONO_FONT[256][16] = {\n")
+        f.write("inline const unsigned char SPACE_MONO_FONT[256][16] = {\n")
 
         for cp in range(256):
             rows = rasterize_glyph(font, cp)

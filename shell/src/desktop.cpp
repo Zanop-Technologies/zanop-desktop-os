@@ -1,6 +1,7 @@
 #include "desktop.hpp"
 #include "../../compositor/src/surface.hpp"
 #include "embedded_icons.hpp"
+#include "../../../zanop-kernel/src/fs/fs.hpp"
 
 namespace desktop_shell {
 
@@ -11,6 +12,82 @@ constexpr surface::Color CYAN{83, 220, 206};
 constexpr surface::Color WHITE{238, 245, 248};
 constexpr surface::Color MUTED{165, 184, 193};
 bool warm_theme = false;
+
+// The installer writes /system/BARKS.CFG when it finishes formatting, so the
+// presence of that file is what "already installed" means to the desktop.
+// Once it is there the Setup shortcut is pointless -- re-running it would
+// reformat the disk -- so we stop offering it.
+bool os_installed = false;
+bool install_shortcut_removed = false;
+
+// One-time banner. The request is "after reboot it says the install shortcut
+// is allowed to be removed" -- so the first boot after installing explains
+// it, and every later boot stays quiet.
+bool removal_notice_pending = false;
+
+void detect_install_state() {
+    os_installed = FS::read_file("/system/BARKS.CFG") != nullptr;
+    install_shortcut_removed = os_installed;
+    removal_notice_pending = os_installed;
+}
+
+// Both layouts. Column 0 always holds the four general apps; column 1 holds
+// Setup (the install shortcut) first, and drops that row once installed so
+// nothing moves underneath the user without reason.
+constexpr DesktopTile TILES_NOT_INSTALLED[] = {
+    {"clock",    32,  86},
+    {"calc",     32, 174},
+    {"snake",    32, 262},
+    {"notes",    32, 350},
+    {"setup",   132,  86},   // install shortcut
+    {"files",   132, 174},
+    {"settings",132, 262},
+};
+constexpr DesktopTile TILES_INSTALLED[] = {
+    {"clock",    32,  86},
+    {"calc",     32, 174},
+    {"snake",    32, 262},
+    {"notes",    32, 350},
+    {"files",   132,  86},
+    {"settings",132, 174},
+};
+
+// Icon + label for one app, matched by the same string the tile table uses.
+// Setup and Settings deliberately share an icon in this build, as they did
+// before the installed-state change.
+const std::uint8_t* icon_for_app(const char* app) {
+    if (app[0] == 'c' && app[1] == 'l') return ICON_CLOCK_RGB;
+    if (app[0] == 'c') return ICON_CALCULATOR_RGB;
+    if (app[0] == 's' && app[1] == 'n') return ICON_SNAKE_RGB;
+    if (app[0] == 'n') return ICON_NOTES_RGB;
+    if (app[0] == 'f') return ICON_FILE_EXPLORER_RGB;
+    return ICON_SETUP_RGB;
+}
+
+const char* label_for_app(const char* app) {
+    if (app[0] == 'c' && app[1] == 'l') return "CLOCK";
+    if (app[0] == 'c') return "CALC";
+    if (app[0] == 's' && app[1] == 'n') return "SNAKE";
+    if (app[0] == 'n') return "NOTES";
+    if (app[0] == 'f') return "FILES";
+    if (app[0] == 's' && app[1] == 'e') return "SETUP";
+    return "SETTINGS";
+}
+
+void draw_removal_notice(std::size_t width) {
+    if (!removal_notice_pending) return;
+    const std::size_t notice_height = 58;
+    const std::size_t notice_y = surface::pixel_height() > 120
+        ? surface::pixel_height() - notice_height - 30 : 4;
+    surface::fill_pixel_rect(24, notice_y, width > 520 ? width - 48 : width, notice_height,
+                             {18, 34, 46});
+    surface::fill_pixel_rect(24, notice_y, 5, notice_height, CYAN);
+    surface::draw_text(44, notice_y + 12,
+                       "ZANOP DESKTOP OS IS INSTALLED", WHITE, 1);
+    surface::draw_text(44, notice_y + 32,
+                       "THE INSTALL SHORTCUT MAY BE REMOVED - THIS NOTICE WILL NOT SHOW AGAIN",
+                       MUTED, 1);
+}
 
 void draw_app_icon(std::size_t x, std::size_t y, const std::uint8_t* pixels,
                    const char* label) {
@@ -52,16 +129,17 @@ void draw_graphical_background() {
         }
     }
 
-    draw_app_icon(32, 86, ICON_CLOCK_RGB, "CLOCK");
-    draw_app_icon(32, 174, ICON_CALCULATOR_RGB, "CALC");
-    draw_app_icon(32, 262, ICON_SNAKE_RGB, "SNAKE");
-    draw_app_icon(32, 350, ICON_NOTES_RGB, "NOTES");
-    draw_app_icon(132, 86, ICON_SETUP_RGB, "SETUP");
-    draw_app_icon(132, 174, ICON_FILE_EXPLORER_RGB, "FILES");
-    draw_app_icon(132, 262, ICON_SETUP_RGB, "SETTINGS");
+    std::size_t tile_count = 0;
+    const DesktopTile* tiles = desktop_tiles(tile_count);
+    for (std::size_t index = 0; index < tile_count; ++index) {
+        draw_app_icon(tiles[index].x, tiles[index].y,
+                      icon_for_app(tiles[index].app),
+                      label_for_app(tiles[index].app));
+    }
     surface::fill_pixel_rect(0, height > 0 ? height - 2 : 0, width, 2, CYAN);
     surface::draw_text(width > 170 ? width - 170 : 8, height > 28 ? height - 26 : 8,
                        "DESKTOP 01", MUTED, 1);
+    draw_removal_notice(width);
     (void)INK;
 }
 
@@ -71,8 +149,54 @@ bool warm_theme_enabled() {
     return warm_theme;
 }
 
+bool install_shortcut_available() {
+    return !install_shortcut_removed;
+}
+
+// Called once at shell startup, before the first background draw.
+void detect_installation() {
+    detect_install_state();
+}
+
+// The notice is shown on the first frame after boot; the caller dismisses it
+// (e.g. on the first key or click) so it does not sit there forever.
+void dismiss_removal_notice() {
+    removal_notice_pending = false;
+}
+
+bool removal_notice_visible() {
+    return removal_notice_pending;
+}
+
 void set_warm_theme(bool enabled) {
     warm_theme = enabled;
+}
+
+const DesktopTile* desktop_tiles(std::size_t& count) {
+    if (install_shortcut_removed) {
+        count = sizeof(TILES_INSTALLED) / sizeof(TILES_INSTALLED[0]);
+        return TILES_INSTALLED;
+    }
+    count = sizeof(TILES_NOT_INSTALLED) / sizeof(TILES_NOT_INSTALLED[0]);
+    return TILES_NOT_INSTALLED;
+}
+
+const char* const* desktop_apps(std::size_t& count) {
+    // Both tables are column-major within a column, but the caller only ever
+    // needs "every app, once each" -- tile order is what the pointer hit-test
+    // in mod.cpp walks.
+    static const char* not_installed[] = {
+        "clock", "calc", "snake", "notes", "setup", "files", "settings"
+    };
+    static const char* installed[] = {
+        "clock", "calc", "snake", "notes", "files", "settings"
+    };
+    if (install_shortcut_removed) {
+        count = sizeof(installed) / sizeof(installed[0]);
+        return installed;
+    }
+    count = sizeof(not_installed) / sizeof(not_installed[0]);
+    return not_installed;
 }
 
 void draw_background() {

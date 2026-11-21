@@ -14,32 +14,47 @@
 #   - ../limine (the Limine bootloader repo, cloned + built earlier)
 #     sits alongside both of the above.
 #
-# FONT DEPENDENCY -- installer/, boot/, and login/ ALL depend on
-# space_mono_font.hpp, which only exists after running
-# installer/tools/ttf_to_vga_font.py against a real Space Mono .ttf.
-# If that header doesn't exist yet, building any of these three
-# folders will fail. Generate it first:
-#   python3 installer/tools/ttf_to_vga_font.py SpaceMono-Regular.ttf \
+# FONT DEPENDENCY -- generated headers come out of scripts and TTFs in assets/fonts/:
+#
+#   compositor/src/embedded_fonts.hpp     (8x12, Space Mono + other faces)
+#       -> assets/fonts/build_fonts.py, read by surface.cpp via
+#          embedded_fonts.hpp. Needed by compositor/, shell/, installer.
+#   installer/src/space_mono_font.hpp     (8x16, VGA text mode)
+#       -> installer/tools/ttf_to_vga_font.py, read by vga_font::load()
+#          for the text-mode boot/installer path.
+#
+# All of these are checked-in generated files, so a clean clone still
+# builds; the rules below only regenerate when a TTF actually changes.
+# To rebuild them by hand:
+#   python3 assets/fonts/build_fonts.py
+#   python3 installer/tools/ttf_to_vga_font.py assets/fonts/MONO.ttf \
 #       installer/src/space_mono_font.hpp
-# (boot/ and login/ both #include it via a relative path into
-# installer/src/ -- see their source files. If you'd rather each folder
-# have its own copy, that's a small path change in boot_screen.cpp and
-# login_screen.cpp, not a Makefile change.)
+#
+# NOTE: neither generator may emit `#include <cstdint>` -- that header
+# does not exist for -target x86_64-unknown-none in a freestanding build.
+# Plain `unsigned char` needs no header and is what they emit.
 
 CXX      := clang++
 AS       := nasm
 LD       := ld
 ICON_PYTHON ?= python3
 
+# --- generated font headers ---
+FONT_ASSETS := assets/fonts/Ubuntu-Regular.ttf assets/fonts/UbuntuMono-Regular.ttf \
+	assets/fonts/MONO.ttf assets/fonts/WOBBLYDOODLE.ttf
+GLYPH_HEADER := compositor/src/embedded_fonts.hpp
+VGA_FONT_HEADER := installer/src/space_mono_font.hpp
+
 KERNEL_DIR := ../zanop-kernel
 LIMINE_DIR := ../Limine
 LIMINE_ASSET_DIR ?= $(if $(wildcard $(LIMINE_DIR)/limine-bios.sys),$(LIMINE_DIR),build/iso/boot/limine)
-LIMINE_INSTALLER ?= $(if $(wildcard $(LIMINE_DIR)/limine),$(LIMINE_DIR)/limine,$(shell command -v limine 2>/dev/null))
+LIMINE_INSTALLER ?= $(shell command -v limine 2>/dev/null)
+USE_GRUB ?= 0
 
 TARGET   := x86_64-unknown-none
 CXXFLAGS := -target $(TARGET) -mcmodel=kernel -ffreestanding -fno-exceptions -fno-rtti \
             -fno-stack-protector -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
-            -Wall -Wextra -std=c++20 -I$(KERNEL_DIR)/src -I.
+            -Wall -Wextra -std=c++20 -I$(KERNEL_DIR)/src -I$(KERNEL_DIR)/src/shell -I.
 
 ASFLAGS  := -f elf64
 LDFLAGS  := -T $(KERNEL_DIR)/src/arch/x86_64/linker.ld -nostdlib --gc-sections
@@ -53,7 +68,14 @@ BUILD_DIR := build
 # new kernel-side folders like src/framebuffer/ are picked up
 # automatically -- no Makefile change needed when kernel-side files
 # are added, only when DESKTOP-side folders are added (see below).
-KERNEL_SRC_CPP := $(shell find $(KERNEL_DIR)/src -name '*.cpp' ! -name 'main.cpp' ! -path '*/memory/mod.cpp')
+#
+# compositor_surface.cpp is EXCLUDED deliberately: it is a stale
+# copy of zanop-desktop-os/compositor/src/surface.cpp (it even
+# #includes that file's header). It defines the same `surface::` and
+# `memcpy` symbols as the real compositor/src/surface.cpp, so linking
+# both fails with multiple-definition errors. The desktop-side file
+# is the live one -- it is the copy carrying the new fonts.
+KERNEL_SRC_CPP := $(shell find $(KERNEL_DIR)/src -name '*.cpp' ! -name 'main.cpp' ! -name 'compositor_surface.cpp' ! -path '*/shell/shell.cpp' ! -path '*/memory/mod.cpp')
 KERNEL_SRC_MAIN := $(KERNEL_DIR)/src/main.cpp
 KERNEL_SRC_ASM  := $(KERNEL_DIR)/src/arch/x86_64/boot.asm
 
@@ -82,10 +104,14 @@ KERNEL_BIN := $(BUILD_DIR)/zanop-desktop-os.bin
 PAYLOAD_ISO_ROOT := $(BUILD_DIR)/payload/iso
 PAYLOAD_IMAGE := $(BUILD_DIR)/payload/zanop-os.img
 
-# Where the final ISO ends up.
-DOWNLOADS_DIR := $(HOME)/Downloads
+# Number each build after the existing ISO files in the destination folder.
+# Override SD_ROOT when the card is mounted somewhere else.
 ISO_DIR       := $(BUILD_DIR)/iso
-ISO_OUT       := $(DOWNLOADS_DIR)/zanop-desktop-os.iso
+SD_ROOT     ?= /run/media/wraine/3866-3334
+ISO_FOLDER    := $(SD_ROOT)/zanop-os-isos
+ISO_COUNT     := $(shell if test -d "$(ISO_FOLDER)"; then find "$(ISO_FOLDER)" -maxdepth 1 -type f \( -iname '*.iso' \) | wc -l; else echo 0; fi)
+BUILD_NUM    ?= $(shell expr $(ISO_COUNT) + 1)
+ISO_OUT       := $(ISO_FOLDER)/$(BUILD_NUM).zanop-desktop-os.iso
 
 .PHONY: all iso release burn clean
 
@@ -100,6 +126,10 @@ $(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/src/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# This legacy interactive shell is not part of the booted desktop path and
+# has stale VGA references. Do not compile it into the desktop kernel image.
+$(BUILD_DIR)/kernel/shell/shell.o: ; @:
+
 $(BUILD_DIR)/desktop/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -107,18 +137,29 @@ $(BUILD_DIR)/desktop/%.o: %.cpp
 $(ICON_HEADER): assets/icons/build_icons.py assets/icons/requirements.txt $(ICON_ASSETS)
 	$(ICON_PYTHON) assets/icons/build_icons.py
 
+$(GLYPH_HEADER): assets/fonts/build_fonts.py $(FONT_ASSETS)
+	$(ICON_PYTHON) assets/fonts/build_fonts.py
+
+$(VGA_FONT_HEADER): installer/tools/ttf_to_vga_font.py assets/fonts/MONO.ttf
+	$(ICON_PYTHON) installer/tools/ttf_to_vga_font.py assets/fonts/MONO.ttf $@
+
+# Recompile the compositor whenever its generated glyph data changes.
+$(BUILD_DIR)/desktop/compositor/src/surface.o: $(GLYPH_HEADER)
+$(BUILD_DIR)/kernel/installer_installer.o: | $(VGA_FONT_HEADER)
+
 $(BUILD_DIR)/desktop/shell/src/desktop.o $(BUILD_DIR)/desktop/shell/src/taskbar.o: $(ICON_HEADER)
 
 $(BUILD_DIR)/boot.o: $(KERNEL_DIR)/src/arch/x86_64/boot.asm
 	@mkdir -p $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $< -o $@
 
-# Build an ISO-hybrid disk image that can be copied verbatim to an ATA disk.
+# Build a compact BIOS GRUB payload for the installer to copy to ATA.
 $(PAYLOAD_IMAGE): $(KERNEL_BIN) Makefile
 	@mkdir -p $(PAYLOAD_ISO_ROOT)/boot/grub
 	cp $(KERNEL_BIN) $(PAYLOAD_ISO_ROOT)/boot/kernel.bin
 	printf 'set timeout=0\nset default=0\nmenuentry "Zanop Desktop OS" {\n    multiboot2 /boot/kernel.bin\n    boot\n}\n' > $(PAYLOAD_ISO_ROOT)/boot/grub/grub.cfg
-	grub-mkrescue -o $@ $(PAYLOAD_ISO_ROOT)
+	grub-mkimage -O i386-pc -o $@ -c $(PAYLOAD_ISO_ROOT)/boot/grub/grub.cfg \
+	-C xz -p '(hd0)/boot/grub' biosdisk iso9660 multiboot2 normal configfile
 
 # --- ISO packaging ---
 # CHANGED from the earlier version: no more `video_mode: text` line.
@@ -130,11 +171,27 @@ $(PAYLOAD_IMAGE): $(KERNEL_BIN) Makefile
 # an unverified config key was exactly what caused wasted rebuild
 # cycles earlier in this project (see FIXES.md).
 iso: $(KERNEL_BIN) $(PAYLOAD_IMAGE)
+	@rm -rf $(ISO_DIR)
 	@mkdir -p $(ISO_DIR)/boot/limine
-	@mkdir -p $(DOWNLOADS_DIR)
+	@mkdir -p $(dir $(ISO_OUT))
 	cp $(KERNEL_BIN) $(ISO_DIR)/boot/kernel.bin
 	cp $(PAYLOAD_IMAGE) $(ISO_DIR)/boot/zanop-payload.img
-	@if test -f "$(LIMINE_ASSET_DIR)/limine-bios.sys" && \
+	@if test "$(USE_GRUB)" = "1"; then \
+	   mkdir -p $(ISO_DIR)/boot/grub; \
+	   printf 'set timeout=0\nset default=0\nmenuentry "Zanop Desktop OS" {\n    multiboot2 /boot/kernel.bin\n    module2 /boot/zanop-payload.img ZANOP_PAYLOAD\n    boot\n}\n' > $(ISO_DIR)/boot/grub/grub.cfg; \
+	   if command -v xorriso >/dev/null 2>&1; then \
+	      grub-mkrescue -o "$(ISO_OUT)" $(ISO_DIR) || exit $$?; \
+	   elif command -v genisoimage >/dev/null 2>&1 && command -v grub-mkimage >/dev/null 2>&1; then \
+	      grub-mkimage -O i386-pc-eltorito -o $(ISO_DIR)/boot/grub/eltorito.img \
+	         -c $(ISO_DIR)/boot/grub/grub.cfg -C xz -p '(cd)/boot/grub' \
+	         biosdisk iso9660 multiboot2 normal configfile || exit $$?; \
+	      genisoimage -R -r -J -b boot/grub/eltorito.img -no-emul-boot \
+	         -boot-load-size 4 -boot-info-table -c boot/grub/boot.cat \
+	         -o "$(ISO_OUT)" $(ISO_DIR) || exit $$?; \
+	   else \
+	      echo "ERROR: GRUB CD packaging requires xorriso or genisoimage plus grub-mkimage."; exit 1; \
+	   fi; \
+	elif test -f "$(LIMINE_ASSET_DIR)/limine-bios.sys" && \
 	   test -f "$(LIMINE_ASSET_DIR)/limine-bios-cd.bin" && \
 	   test -f "$(LIMINE_ASSET_DIR)/limine-uefi-cd.bin"; then \
 	   if test "$(LIMINE_ASSET_DIR)" != "$(ISO_DIR)/boot/limine"; then \
@@ -143,22 +200,22 @@ iso: $(KERNEL_BIN) $(PAYLOAD_IMAGE)
 	   fi; \
 	   printf 'timeout: 0\n\n/Zanop Desktop OS\n    protocol: multiboot2\n    kernel_path: boot():/boot/kernel.bin\n    module_path: boot():/boot/zanop-payload.img\n    module_string: ZANOP_PAYLOAD\n' \
 	      > $(ISO_DIR)/boot/limine/limine.conf; \
+	   if ! command -v xorriso >/dev/null 2>&1; then \
+	      echo "ERROR: xorriso is required for a Limine BIOS/UEFI ISO; refusing a non-bootable fallback."; exit 1; \
+	   fi; \
 	   xorriso -as mkisofs -R -r -J -b boot/limine/limine-bios-cd.bin \
 	      -no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus \
 	      -apm-block-size 2048 \
 	      --efi-boot boot/limine/limine-uefi-cd.bin \
 	      -efi-boot-part --efi-boot-image --protective-msdos-label \
-	      $(ISO_DIR) -o "$(ISO_OUT)"; \
+	      $(ISO_DIR) -o "$(ISO_OUT)" || exit $$?; \
 	   if test -n "$(LIMINE_INSTALLER)" && test -x "$(LIMINE_INSTALLER)"; then \
-	      "$(LIMINE_INSTALLER)" bios-install "$(ISO_OUT)"; \
+	      "$(LIMINE_INSTALLER)" bios-install "$(ISO_OUT)" || exit $$?; \
 	   else \
-	      echo "Limine BIOS installer not found; using the Limine CD boot images as-is."; \
+	      echo "ERROR: Limine BIOS installer is required to make the hybrid ISO BIOS-bootable."; exit 1; \
 	   fi; \
 	else \
-	   mkdir -p $(ISO_DIR)/boot/grub; \
-	   printf 'set timeout=0\nset default=0\nmenuentry "Zanop Desktop OS" {\n    multiboot2 /boot/kernel.bin\n    module2 /boot/zanop-payload.img ZANOP_PAYLOAD\n    boot\n}\n' \
-	      > $(ISO_DIR)/boot/grub/grub.cfg; \
-	   grub-mkrescue -o "$(ISO_OUT)" $(ISO_DIR); \
+	   echo "ERROR: Limine boot assets are missing; set USE_GRUB=1 to explicitly use GRUB."; exit 1; \
 	fi
 	@echo "ISO written to $(ISO_OUT)"
 

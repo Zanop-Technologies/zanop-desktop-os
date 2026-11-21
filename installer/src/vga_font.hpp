@@ -1,5 +1,8 @@
 #pragma once
-#include <cstdint>
+// Relative to zanop-kernel, which sits as a sibling of this repo. Avoid an
+// absolute path here: the old hardcoded one broke the moment the checkout
+// moved to a different drive.
+#include "../../../zanop-kernel/src/types.hpp"
 
 // Loads a custom 8x16 bitmap font into VGA text-mode hardware,
 // replacing the default BIOS/CP437 glyph table. Standard technique

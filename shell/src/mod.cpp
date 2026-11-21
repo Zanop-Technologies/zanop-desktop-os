@@ -15,9 +15,10 @@ namespace {
 
 constexpr std::uint8_t SC_ESC = 0x01;
 constexpr std::uint8_t SC_S   = 0x1F;
-constexpr const char* DESKTOP_APPS[] = {
-    "clock", "calc", "snake", "notes", "files", "settings", "setup"
-};
+
+// The desktop tiles -- and with them the app list -- shrink when the OS is
+// already installed, since the Setup/install shortcut is no longer offered.
+constexpr std::size_t ICON_SPAN = 56;
 constexpr std::size_t POINTER_WIDTH = 12;
 constexpr std::size_t POINTER_HEIGHT = 16;
 std::uint32_t pointer_underlay[POINTER_WIDTH * POINTER_HEIGHT];
@@ -56,17 +57,24 @@ void draw_pointer(int x, int y) {
     surface::fill_pixel_rect(static_cast<std::size_t>(x + 4), static_cast<std::size_t>(y + 8),
                              4, 2, {83, 220, 206});
     pointer_visible = true;
+    // The pointer is drawn after the desktop has already been flipped, so it
+    // needs its own present(). Without this the cursor landed in the back
+    // buffer and stayed invisible until something else happened to push a
+    // frame out.
+    if (surface::graphics_available()) surface::present();
 }
 
 const char* app_at(int x, int y) {
-    if (x >= 124 && x < 188 && y >= 82 && y < 150) return DESKTOP_APPS[6];
-    if (x >= 124 && x < 188 && y >= 170 && y < 238) return DESKTOP_APPS[4];
-    if (x >= 124 && x < 188 && y >= 258 && y < 326) return DESKTOP_APPS[5];
-    if (x < 24 || x >= 88) return nullptr;
-    constexpr int ICON_TOPS[] = {86, 174, 262, 350};
-    for (std::size_t index = 0; index < 4; ++index) {
-        if (y >= ICON_TOPS[index] - 4 && y < ICON_TOPS[index] + 64) {
-            return DESKTOP_APPS[index];
+    // Reads the same tile table the desktop painter uses, so removing the
+    // install shortcut cannot desync the hit-test from what is on screen.
+    std::size_t count = 0;
+    const DesktopTile* tiles = desktop_tiles(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        const int left = static_cast<int>(tiles[index].x);
+        const int top = static_cast<int>(tiles[index].y);
+        const int span = static_cast<int>(ICON_SPAN);
+        if (x >= left - 8 && x < left + span && y >= top - 4 && y < top + 64) {
+            return tiles[index].app;
         }
     }
     return nullptr;
@@ -92,15 +100,22 @@ void redraw(bool menu_open, compositor::Window* menu) {
     draw_top_bar();
     draw_bottom_bar();
     if (menu_open && menu) menu->draw();
+    // Everything above landed in the back buffer; one present() flips the
+    // finished frame out, so the user never sees a half-drawn desktop.
+    surface::present();
 }
 
 } // namespace
 
 void run() {
     VGA::init();
+    // Before the first paint: an installed system must not offer the install
+    // shortcut, and wants the "may be removed" banner for this boot only.
+    detect_installation();
     draw_background();
     draw_top_bar();
     draw_bottom_bar();
+    surface::present();
 
     bool menu_open = false;
     compositor::Window menu = make_start_menu(); // constructed once, reused
@@ -112,6 +127,12 @@ void run() {
     while (true) {
         if (auto scancode = input::try_read_scancode()) {
             const std::uint8_t sc = *scancode;
+            // Any keypress acknowledges the "install shortcut may be removed"
+            // banner; it never comes back on later boots.
+            if (removal_notice_visible()) {
+                dismiss_removal_notice();
+                redraw(menu_open, &menu);
+            }
             if (sc == SC_S && !menu_open) {
                 menu = make_start_menu();
                 menu_open = true;
@@ -166,6 +187,10 @@ void run() {
             }
             left_was_down = left_down;
             if (surface::graphics_available()) draw_pointer(cursor_x, cursor_y);
+            // draw_pointer() presents the frame itself, since the pointer is
+            // drawn on top of an already-flipped desktop. Doing it here
+            // rather than per-draw call is what keeps mouse motion free
+            // of flicker.
         }
 
         __asm__ volatile("pause");

@@ -45,11 +45,48 @@ void clear_text(char* text, std::size_t capacity) {
     for (std::size_t index = 0; index < capacity; ++index) text[index] = '\0';
 }
 
-AppFrame draw_frame(const char* title, const char* subtitle) {
-    draw_background();
-    draw_top_bar();
-    draw_bottom_bar();
+bool append_path(char* output, std::size_t capacity, const char* parent,
+                 const char* child) {
+    std::size_t length = 0;
+    while (parent[length] != '\0' && length + 1 < capacity) {
+        output[length] = parent[length];
+        ++length;
+    }
+    if (parent[length] != '\0') return false;
+    if (length > 1) {
+        if (length + 1 >= capacity) return false;
+        output[length++] = '/';
+    }
+    for (std::size_t index = 0; child[index] != '\0'; ++index) {
+        if (length + 1 >= capacity) return false;
+        output[length++] = child[index];
+    }
+    output[length] = '\0';
+    return true;
+}
 
+void move_to_parent(char* path) {
+    std::size_t length = text_length(path);
+    if (length <= 1) return;
+    while (length > 1 && path[length - 1] != '/') --length;
+    path[length == 1 ? 1 : length - 1] = '\0';
+}
+
+bool is_system_path(const char* path) {
+    const char prefix[] = "/system/";
+    if (text_length(path) == 7) {
+        for (std::size_t index = 0; index < 7; ++index) {
+            if (path[index] != prefix[index]) return false;
+        }
+        return true;
+    }
+    for (std::size_t index = 0; index < sizeof(prefix) - 1; ++index) {
+        if (path[index] != prefix[index]) return false;
+    }
+    return true;
+}
+
+AppFrame draw_frame(const char* title, const char* subtitle) {
     const std::size_t screen_width = surface::pixel_width();
     const std::size_t screen_height = surface::pixel_height();
     const std::size_t width = screen_width > 700 ? 640
@@ -67,29 +104,41 @@ AppFrame draw_frame(const char* title, const char* subtitle) {
     surface::fill_pixel_rect(frame.x + frame.width - 36, frame.y + 20, 14, 14, CORAL);
     surface::draw_text(frame.x + 24, frame.y + frame.height - 25,
                        "ESC BACK", MUTED, 1);
+    // Every app builds its whole frame through draw_frame(), so flipping
+    // here is the single point that makes each app visible. Without it the
+    // apps drew into the back buffer and the user saw nothing at all.
+    surface::present();
     return frame;
 }
 
 void draw_clock() {
     constexpr Color ORANGE{246, 166, 105};
-    unsigned tick = 0;
+    // Chrome is static, so paint it once. The poll loop below runs hundreds of
+    // times a second; rebuilding the whole window every one of those is what
+    // made the clock feel slow and stuttery.
+    AppFrame frame = draw_frame("CLOCK", "LOCAL HARDWARE TIME");
+    surface::fill_pixel_rect(frame.x + 80, frame.y + 350, frame.width - 160, 2,
+                             {207, 220, 223});
+    surface::draw_text(frame.x + 90, frame.y + 370,
+                       "TIME READ FROM CMOS REAL TIME CLOCK", INK, 1);
+    surface::present();
+    std::uint8_t previous_second = 0xFF;
     while (true) {
-        AppFrame frame = draw_frame("CLOCK", "LOCAL HARDWARE TIME");
         const std::uint8_t hour = bcd_to_binary(read_rtc(0x04));
         const std::uint8_t minute = bcd_to_binary(read_rtc(0x02));
         const std::uint8_t second = bcd_to_binary(read_rtc(0x00));
-        char time[9] = {
-            static_cast<char>('0' + hour / 10), static_cast<char>('0' + hour % 10), ':',
-            static_cast<char>('0' + minute / 10), static_cast<char>('0' + minute % 10), ':',
-            static_cast<char>('0' + second / 10), static_cast<char>('0' + second % 10), '\0'
-        };
-        const std::size_t clock_width = 8 * 6 * 12;
-        surface::draw_text(frame.x + (frame.width - clock_width) / 2,
-                           frame.y + 190, time, ORANGE, 12);
-        surface::fill_pixel_rect(frame.x + 80, frame.y + 350, frame.width - 160, 2,
-                                 {207, 220, 223});
-        surface::draw_text(frame.x + 90, frame.y + 370,
-                           "TIME READ FROM CMOS REAL TIME CLOCK", INK, 1);
+        if (second != previous_second) {
+            char time[9] = {
+                static_cast<char>('0' + hour / 10), static_cast<char>('0' + hour % 10), ':',
+                static_cast<char>('0' + minute / 10), static_cast<char>('0' + minute % 10), ':',
+                static_cast<char>('0' + second / 10), static_cast<char>('0' + second % 10), '\0'
+            };
+            surface::fill_pixel_rect(frame.x + 32, frame.y + 176,
+                                     frame.width - 64, 92, PANEL);
+            surface::draw_text(frame.x + 32, frame.y + 190, time, ORANGE, 12);
+            previous_second = second;
+            surface::present();
+        }
 
         for (unsigned delay = 0; delay < 300000; ++delay) {
             __asm__ volatile("pause");
@@ -97,7 +146,6 @@ void draw_clock() {
         auto code = input::try_read_scancode();
         if (code && *code == 0x01) return;
         if (code) input::scancode_to_ascii(*code);
-        if (++tick == 4) tick = 0;
     }
 }
 
@@ -172,6 +220,7 @@ void draw_calculator() {
             surface::draw_text(x + key_width / 2 - 3, y + 17, keys[index], INK, 1);
         }
 
+        surface::present();
         std::uint8_t code = input::read_scancode();
         if (code == 0x01) return;
         auto character = input::scancode_to_ascii(code);
@@ -203,7 +252,8 @@ void draw_notes() {
     char note[256];
     clear_text(note, sizeof(note));
     std::size_t length = 0;
-    const char* saved_note = FS::read_file("note.txt");
+    const char* saved_note = FS::read_file("/home/Documents/note.txt");
+    if (saved_note == nullptr) saved_note = FS::read_file("/note.txt");
     while (saved_note && saved_note[length] != '\0' && length < sizeof(note) - 1) {
         note[length] = saved_note[length];
         ++length;
@@ -236,12 +286,13 @@ void draw_notes() {
         }
         if (saved) surface::draw_text(frame.x + 46, frame.y + frame.height - 55,
                                      "SAVED TO NOTE.TXT - PRESS A KEY", TEAL, 1);
+        surface::present();
 
         std::uint8_t code = input::read_scancode();
         if (saved) return;
         if (code == 0x01) {
             note[length] = '\0';
-            FS::create_file("note.txt", note);
+            FS::create_file("/home/Documents/note.txt", note);
             saved = true;
             continue;
         }
@@ -275,13 +326,16 @@ void draw_snake() {
     snake[1] = {columns / 2 - 1, rows / 2};
     snake[2] = {columns / 2 - 2, rows / 2};
 
-    while (true) {
-        AppFrame frame = draw_frame("SNAKE", "W A S D MOVE - R RESTART - ESC EXIT");
-        const std::size_t cell = 18;
-        const std::size_t board_width = columns * cell;
-        const std::size_t board_height = rows * cell;
-        const std::size_t board_x = frame.x + (frame.width - board_width) / 2;
-        const std::size_t board_y = frame.y + 112;
+    AppFrame frame = draw_frame("SNAKE", "W A S D MOVE - R RESTART - ESC EXIT");
+    constexpr std::size_t cell = 18;
+    constexpr std::size_t board_width = columns * cell;
+    constexpr std::size_t board_height = rows * cell;
+    const std::size_t board_x = frame.x + (frame.width - board_width) / 2;
+    const std::size_t board_y = frame.y + 112;
+    const std::size_t score_x = frame.x + 34;
+    const std::size_t score_y = frame.y + 390;
+
+    auto draw_board = [&]() {
         surface::fill_pixel_rect(board_x - 5, board_y - 5, board_width + 10,
                                  board_height + 10, {29, 51, 62});
         surface::fill_pixel_rect(board_x, board_y, board_width, board_height, {17, 34, 43});
@@ -293,31 +347,47 @@ void draw_snake() {
         }
         surface::fill_pixel_rect(board_x + food.x * cell + 4, board_y + food.y * cell + 4,
                                  cell - 7, cell - 7, CORAL);
+    };
+
+    auto draw_score = [&]() {
+        surface::fill_pixel_rect(score_x, score_y - 4, 160, 22, PANEL);
         char score_label[24] = "SCORE ";
         draw_integer(static_cast<int>(score), score_label + 6, sizeof(score_label) - 6);
-        surface::draw_text(frame.x + 34, frame.y + 390, score_label, INK, 1);
-        if (game_over) {
-            surface::fill_pixel_rect(board_x + 74, board_y + 96, board_width - 148, 64, DARK);
-            surface::draw_text(board_x + 111, board_y + 122, "GAME OVER - R TO RESTART",
-                               {238, 245, 248}, 1);
-        }
+        surface::draw_text(score_x, score_y, score_label, INK, 1);
+    };
+
+    draw_board();
+    draw_score();
+    while (true) {
 
         for (unsigned delay = 0; delay < 700000; ++delay) __asm__ volatile("pause");
         auto code = input::try_read_scancode();
         if (code && *code == 0x01) return;
+
+        if (game_over) {
+            if (code) {
+                auto character = input::scancode_to_ascii(*code);
+                if (character && (*character == 'r' || *character == 'R')) {
+                    length = 3;
+                    snake[0] = {columns / 2, rows / 2};
+                    snake[1] = {columns / 2 - 1, rows / 2};
+                    snake[2] = {columns / 2 - 2, rows / 2};
+                    food = {16, 7};
+                    direction_x = 1;
+                    direction_y = 0;
+                    score = 0;
+                    game_over = false;
+                    draw_board();
+                    draw_score();
+                    surface::present();
+                }
+            }
+            continue;
+        }
+
         if (code) {
             auto character = input::scancode_to_ascii(*code);
-            if (character && (*character == 'r' || *character == 'R') && game_over) {
-                length = 3;
-                snake[0] = {columns / 2, rows / 2};
-                snake[1] = {columns / 2 - 1, rows / 2};
-                snake[2] = {columns / 2 - 2, rows / 2};
-                food = {16, 7};
-                direction_x = 1;
-                direction_y = 0;
-                score = 0;
-                game_over = false;
-            } else if (character && !game_over) {
+            if (character) {
                 if ((*character == 'w' || *character == 'W') && direction_y != 1) {
                     direction_x = 0; direction_y = -1;
                 } else if ((*character == 's' || *character == 'S') && direction_y != -1) {
@@ -329,25 +399,61 @@ void draw_snake() {
                 }
             }
         }
-        if (game_over) continue;
 
         Point head{(snake[0].x + direction_x + columns) % columns,
                    (snake[0].y + direction_y + rows) % rows};
         for (int index = 0; index < length; ++index) {
-            if (snake[index].x == head.x && snake[index].y == head.y) game_over = true;
+            if (snake[index].x == head.x && snake[index].y == head.y) {
+                game_over = true;
+                break;
+            }
         }
-        if (game_over) continue;
+        if (game_over) {
+            surface::fill_pixel_rect(board_x + 74, board_y + 96, board_width - 148, 64, DARK);
+            surface::draw_text(board_x + 111, board_y + 122, "GAME OVER - R TO RESTART",
+                               {238, 245, 248}, 1);
+            surface::present();
+            continue;
+        }
+
         const bool ate = head.x == food.x && head.y == food.y;
+        const Point old_tail = snake[length - 1];
+        if (!ate) {
+            surface::fill_pixel_rect(board_x + old_tail.x * cell + 2,
+                                     board_y + old_tail.y * cell + 2,
+                                     cell - 3, cell - 3, {17, 34, 43});
+        }
         if (ate && length < max_length) {
             ++length;
             ++score;
         }
+        surface::fill_pixel_rect(board_x + snake[0].x * cell + 2,
+                                 board_y + snake[0].y * cell + 2,
+                                 cell - 3, cell - 3, {82, 167, 156});
         for (int index = length - 1; index > 0; --index) snake[index] = snake[index - 1];
         snake[0] = head;
+        surface::fill_pixel_rect(board_x + head.x * cell + 2,
+                                 board_y + head.y * cell + 2,
+                                 cell - 3, cell - 3, TEAL);
+        // The board is fully repainted before this point (draw_board() or the
+        // incremental erase/shift above), so one flip publishes the move.
+        surface::present();
+        if (ate) {
+            surface::fill_pixel_rect(board_x + food.x * cell + 4,
+                                     board_y + food.y * cell + 4,
+                                     cell - 7, cell - 7, {17, 34, 43});
+        }
         if (ate) {
             ++step;
             food = {(head.x + 7 + static_cast<int>(step)) % columns,
                     (head.y + 5 + static_cast<int>(step * 3)) % rows};
+            surface::fill_pixel_rect(board_x + food.x * cell + 4,
+                                     board_y + food.y * cell + 4,
+                                     cell - 7, cell - 7, CORAL);
+        }
+        if (ate) {
+            draw_score();
+            surface::present();
         }
     }
 }
@@ -357,25 +463,36 @@ void draw_file_manager() {
     std::size_t first_visible = 0;
     bool previewing = false;
     bool preview_readable = false;
+    const char* status_message = nullptr;
+    char current_directory[48] = "/";
     char preview_name[48];
+    char preview_path[48];
     char preview_content[256];
     std::size_t preview_size = 0;
     clear_text(preview_name, sizeof(preview_name));
+    clear_text(preview_path, sizeof(preview_path));
     clear_text(preview_content, sizeof(preview_content));
 
     while (true) {
-        const std::size_t count = FS::file_count();
+        const std::size_t count = FS::directory_entry_count(current_directory);
         if (count == 0) selected = 0;
         else if (selected >= count) selected = count - 1;
         if (selected < first_visible) first_visible = selected;
-        if (selected >= first_visible + 10) first_visible = selected - 9;
+        if (selected >= first_visible + 8) first_visible = selected - 7;
 
         AppFrame frame = draw_frame("FILES", previewing
-            ? "ESC FILE LIST - ENTER CLOSE PREVIEW"
-            : "J/K OR W/S SELECT - ENTER PREVIEW");
+            ? "ESC FILE LIST - ENTER CLOSE PREVIEW" : current_directory);
         surface::fill_pixel_rect(frame.x + 28, frame.y + 112,
                                  frame.width - 56, frame.height - 156,
                                  {250, 249, 239});
+        if (!previewing) {
+            surface::draw_text(frame.x + 48, frame.y + 132,
+                               "ENTER OPEN  D DELETE  ESC UP", MUTED, 1);
+            if (status_message != nullptr) {
+                surface::draw_text(frame.x + 48, frame.y + frame.height - 52,
+                                   status_message, status_message[0] == 'S' ? CORAL : TEAL, 1);
+            }
+        }
 
         if (previewing) {
             surface::draw_text(frame.x + 48, frame.y + 128, preview_name, TEAL, 1);
@@ -403,35 +520,66 @@ void draw_file_manager() {
             }
         } else if (count == 0) {
             surface::draw_text(frame.x + 48, frame.y + 144,
-                               "NO FILES - SAVE A NOTE TO CREATE ONE", MUTED, 1);
+                               "EMPTY FOLDER", MUTED, 1);
         } else {
-            const std::size_t visible_count = count - first_visible < 10
-                ? count - first_visible : 10;
+            const std::size_t visible_count = count - first_visible < 8
+                ? count - first_visible : 8;
             for (std::size_t row = 0; row < visible_count; ++row) {
-                const std::size_t file_index = first_visible + row;
-                const char* name = FS::file_name(file_index);
-                const std::size_t row_y = frame.y + 124 + row * 30;
-                if (file_index == selected) {
+                const std::size_t entry_index = first_visible + row;
+                FS::DirectoryEntry entry{};
+                if (!FS::directory_entry(current_directory, entry_index, entry)) continue;
+                const std::size_t row_y = frame.y + 158 + row * 32;
+                if (entry_index == selected) {
                     surface::fill_pixel_rect(frame.x + 40, row_y - 4,
                                              frame.width - 80, 26, {217, 238, 234});
                 }
-                if (name != nullptr) {
-                    surface::draw_text(frame.x + 54, row_y, name,
-                                       file_index == selected ? INK : MUTED, 1);
-                }
+                surface::draw_text(frame.x + 54, row_y, entry.name,
+                                   entry_index == selected ? INK : MUTED, 1);
+                surface::draw_text(frame.x + frame.width - 136, row_y,
+                                   entry.is_directory ? "FOLDER" : "FILE",
+                                   entry.is_directory ? TEAL : MUTED, 1);
             }
         }
 
+        surface::present();
         const std::uint8_t scancode = input::read_scancode();
         if (scancode == 0x01) {
             if (previewing) previewing = false;
-            else return;
+            else if (current_directory[0] == '/' && current_directory[1] == '\0') return;
+            else move_to_parent(current_directory);
+            selected = 0;
+            first_visible = 0;
             continue;
         }
         auto character = input::scancode_to_ascii(scancode);
         if (!character) continue;
         if (previewing) {
-            if (*character == '\n') previewing = false;
+            if (*character == '\n' || *character == '\b') previewing = false;
+            continue;
+        }
+        if (*character == '\b') {
+            if (!(current_directory[0] == '/' && current_directory[1] == '\0')) {
+                move_to_parent(current_directory);
+                selected = 0;
+                first_visible = 0;
+            }
+            continue;
+        }
+        if (*character == 'd' && count > 0) {
+            FS::DirectoryEntry entry{};
+            if (!FS::directory_entry(current_directory, selected, entry)) continue;
+            char entry_path[48];
+            if (!append_path(entry_path, sizeof(entry_path), current_directory, entry.name)) continue;
+            const bool removed = entry.is_directory
+                ? FS::remove_directory(entry_path) : FS::remove_file(entry_path);
+            if (removed) {
+                status_message = "ENTRY DELETED";
+                if (selected > 0) --selected;
+            } else if (is_system_path(entry_path)) {
+                status_message = "SYSTEM FOLDER PROTECTED";
+            } else {
+                status_message = "FOLDER MUST BE EMPTY";
+            }
             continue;
         }
         if (*character == 'j' || *character == 's') {
@@ -439,15 +587,30 @@ void draw_file_manager() {
         } else if (*character == 'k' || *character == 'w') {
             if (selected > 0) --selected;
         } else if (*character == '\n' && count > 0) {
-            const char* name = FS::file_name(selected);
-            if (name == nullptr) continue;
-            std::size_t index = 0;
-            while (name[index] != '\0' && index + 1 < sizeof(preview_name)) {
-                preview_name[index] = name[index];
-                ++index;
+            FS::DirectoryEntry entry{};
+            if (!FS::directory_entry(current_directory, selected, entry)) continue;
+            char entry_path[48];
+            if (!append_path(entry_path, sizeof(entry_path), current_directory, entry.name)) continue;
+            if (entry.is_directory) {
+                const std::size_t path_length = text_length(entry_path);
+                for (std::size_t index = 0; index < path_length; ++index) {
+                    current_directory[index] = entry_path[index];
+                }
+                current_directory[path_length] = '\0';
+                selected = 0;
+                first_visible = 0;
+                status_message = nullptr;
+                continue;
             }
-            preview_name[index] = '\0';
-            preview_readable = FS::read_file(name,
+            for (std::size_t index = 0; entry.name[index] != '\0'; ++index) {
+                preview_name[index] = entry.name[index];
+            }
+            preview_name[text_length(entry.name)] = '\0';
+            for (std::size_t index = 0; entry_path[index] != '\0'; ++index) {
+                preview_path[index] = entry_path[index];
+            }
+            preview_path[text_length(entry_path)] = '\0';
+            preview_readable = FS::read_file(preview_path,
                 reinterpret_cast<std::uint8_t*>(preview_content),
                 sizeof(preview_content) - 1, preview_size);
             if (preview_readable) preview_content[preview_size] = '\0';
@@ -472,6 +635,7 @@ void draw_settings() {
                            "2  EMBER", INK, 2);
         surface::draw_text(frame.x + 54, frame.y + 356,
                            "THE CHANGE APPLIES WHEN YOU RETURN TO THE DESKTOP", MUTED, 1);
+        surface::present();
 
         const std::uint8_t scancode = input::read_scancode();
         if (scancode == 0x01) return;

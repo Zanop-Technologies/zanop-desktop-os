@@ -12,6 +12,8 @@ Cargo.lock
 .vscode/
 .idea/
 *.swp
+# Python font generator cache
+__pycache__/
 
 # OS-specific
 .DS_Store

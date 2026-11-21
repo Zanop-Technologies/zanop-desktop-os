@@ -1,17 +1,13 @@
 #include "launcher.hpp"
 #include "../../compositor/src/surface.hpp"
+#include "desktop.hpp"
 #include "../../../zanop-kernel/src/apps/apps.hpp"
 
 namespace desktop_shell {
 
 namespace {
 
-constexpr const char* APP_NAMES[] = {
-    "clock", "calc", "snake", "notes", "files", "settings", "setup"
-};
-constexpr std::size_t APP_COUNT = sizeof(APP_NAMES) / sizeof(APP_NAMES[0]);
-
-}
+} // namespace
 
 compositor::Window make_start_menu() {
     std::size_t x = 24;
@@ -33,8 +29,13 @@ compositor::Window make_start_menu() {
     line++; // blank line
 
     char buf[40];
-    for (std::size_t index = 0; index < APP_COUNT; ++index) {
-        const char* name = APP_NAMES[index];
+    // Read the app list live: the Setup/installer entry disappears once the
+    // OS is installed, and the Start menu must shrink with it rather than
+    // still offering a re-format.
+    std::size_t app_count = 0;
+    const char* const* app_names = desktop_apps(app_count);
+    for (std::size_t index = 0; index < app_count; ++index) {
+        const char* name = app_names[index];
         // manual itoa -- no snprintf guaranteed under -nostdlib
         buf[0] = static_cast<char>('1' + index);
         buf[1] = ' ';
@@ -51,9 +52,10 @@ compositor::Window make_start_menu() {
 }
 
 const char* app_for_key(char key) {
-    if (key < '1' || key > static_cast<char>('1' + APP_COUNT - 1)) return nullptr;
-    std::size_t index = static_cast<std::size_t>(key - '1');
-    return APP_NAMES[index];
+    std::size_t count = 0;
+    const char* const* names = desktop_apps(count);
+    if (key < '1' || key > static_cast<char>('1' + count - 1)) return nullptr;
+    return names[static_cast<std::size_t>(key - '1')];
 }
 
 const char* app_for_pointer(std::size_t x, std::size_t y) {
@@ -68,9 +70,11 @@ const char* app_for_pointer(std::size_t x, std::size_t y) {
     const std::size_t menu_y = (screen_height - height) / 2;
     if (x < menu_x + 18 || x >= menu_x + width - 18) return nullptr;
 
-    for (std::size_t index = 0; index < APP_COUNT; ++index) {
+    std::size_t count = 0;
+    const char* const* names = desktop_apps(count);
+    for (std::size_t index = 0; index < count; ++index) {
         const std::size_t row_y = menu_y + 76 + (index + 2) * 31;
-        if (y >= row_y - 6 && y < row_y + 22) return APP_NAMES[index];
+        if (y >= row_y - 6 && y < row_y + 22) return names[index];
     }
     return nullptr;
 }
