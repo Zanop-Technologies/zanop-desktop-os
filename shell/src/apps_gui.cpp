@@ -1,6 +1,7 @@
 #include "apps_gui.hpp"
 #include "desktop.hpp"
 #include "taskbar.hpp"
+#include "legacy_shell.hpp"
 #include "../../compositor/src/surface.hpp"
 #include "../../input/src/input.hpp"
 #include "../../../zanop-kernel/src/fs/fs.hpp"
@@ -648,6 +649,122 @@ void draw_settings() {
 
 } // namespace
 
+// -- TERMINAL -------------------------------------------------------------
+// Graphical front end for the ECMXS shell (legacy_shell). Runs the same
+// command engine as the text-mode terminal, but inside an app frame: each
+// command is one line of input, its output is appended to a scrolling
+// buffer, and the prompt is "<computer>@shell~$".
+constexpr std::size_t TERM_LINES = 14;
+constexpr std::size_t TERM_COLS = 74;
+char term_lines[TERM_LINES][TERM_COLS];
+std::size_t term_head = 0;   // index of the next line to write
+std::size_t term_used = 0;   // lines currently held (up to TERM_LINES)
+bool term_app_open = false;  // lets Ctrl+Alt+T in the desktop loop know
+
+void term_push_line(const char* text) {
+    // A command's output can contain embedded newlines (e.g. cat of a file
+    // body); split it so every visual row is one buffer line.
+    const char* start = text;
+    while (*start) {
+        const char* end = start;
+        while (*end && *end != '\n') ++end;
+        char row[TERM_COLS];
+        std::size_t n = 0;
+        for (const char* p = start; p != end && n + 1 < TERM_COLS; ++p) row[n++] = *p;
+        row[n] = '\0';
+        for (std::size_t i = 0; i <= n; ++i) term_lines[term_head][i] = row[i];
+        term_head = (term_head + 1) % TERM_LINES;
+        if (term_used < TERM_LINES) ++term_used;
+        if (*end == '\n') ++end;
+        start = end;
+    }
+}
+void term_clear() {
+    for (std::size_t r = 0; r < TERM_LINES; ++r)
+        for (std::size_t c = 0; c < TERM_COLS; ++c) term_lines[r][c] = '\0';
+    term_head = 0;
+    term_used = 0;
+}
+void term_draw(const AppFrame& frame, const char* input_text,
+               const char* prompt) {
+    for (std::size_t r = 0; r < TERM_LINES; ++r) {
+        const std::size_t row = (term_head + TERM_LINES - term_used + r) % TERM_LINES;
+        surface::fill_pixel_rect(frame.x + 20, frame.y + 100 + r * 20,
+                                 frame.width - 40, 18, PANEL);
+        if (r < term_used) {
+            surface::draw_text(frame.x + 20, frame.y + 100 + r * 20,
+                               term_lines[row], INK, 1);
+        }
+    }
+    surface::fill_pixel_rect(frame.x + 16, frame.y + frame.height - 66,
+                             frame.width - 32, 34, DARK);
+    surface::draw_text(frame.x + 24, frame.y + frame.height - 56, prompt, TEAL, 1);
+    surface::draw_text(frame.x + 24 + surface::text_advance(1) * text_length(prompt),
+                       frame.y + frame.height - 56, input_text, {238, 245, 248}, 1);
+    surface::present();
+}
+void draw_terminal() {
+    term_app_open = true;
+    AppFrame frame = draw_frame("TERMINAL", "ECMXS - TYPE HLP FOR COMMANDS");
+    term_clear();
+    term_push_line("Zanop ECMXS terminal (type hlp)");
+    legacy_shell::init();
+    legacy_shell::set_emit(term_push_line);
+
+    char input_text[TERM_COLS] = {};
+    std::size_t input_len = 0;
+    char prompt[16];
+    auto make_prompt = [&]() {
+        std::size_t p = 0;
+        const char* name = legacy_shell::computer_name();
+        while (*name && p < sizeof(prompt) - 1) prompt[p++] = *name++;
+        const char* mid = "@shell~$ ";
+        for (std::size_t i = 0; mid[i] && p < sizeof(prompt) - 1; ++i) prompt[p++] = mid[i];
+        prompt[p] = '\0';
+    };
+    make_prompt();
+    term_draw(frame, "", prompt);
+
+    while (true) {
+        const std::uint8_t scancode = input::read_scancode();
+        if (scancode == 0x01) break; // ESC
+        auto character = input::scancode_to_ascii(scancode);
+        if (!character) continue;
+        if (*character == '\b' || *character == 127) {
+            if (input_len) {
+                --input_len;
+                input_text[input_len] = '\0';
+                term_draw(frame, input_text, prompt);
+            }
+            continue;
+        }
+        if (*character == '\n' || *character == '\r') {
+            if (input_len) {
+                char echoed[TERM_COLS * 2];
+                std::size_t e = 0;
+                for (std::size_t i = 0; prompt[i] && e < sizeof(echoed) - 1; ++i) echoed[e++] = prompt[i];
+                for (std::size_t i = 0; input_text[i] && e < sizeof(echoed) - 1; ++i) echoed[e++] = input_text[i];
+                echoed[e] = '\0';
+                term_push_line(echoed);
+                legacy_shell::run_command(input_text);
+                for (std::size_t i = 0; i <= input_len; ++i) input_text[i] = '\0';
+                input_len = 0;
+            }
+            make_prompt();
+            term_draw(frame, input_text, prompt);
+            continue;
+        }
+        if (*character >= 32 && *character <= 126 &&
+            input_len + 1 < sizeof(input_text)) {
+            input_text[input_len++] = *character;
+            input_text[input_len] = '\0';
+            term_draw(frame, input_text, prompt);
+        }
+    }
+    legacy_shell::set_emit(nullptr);
+    term_app_open = false;
+}
+
 void run_graphical_app(const char* name) {
     if (name[0] == 'c' && name[1] == 'l') draw_clock();
     else if (name[0] == 'c') draw_calculator();
@@ -655,6 +772,7 @@ void run_graphical_app(const char* name) {
     else if (name[0] == 'f') draw_file_manager();
     else if (name[0] == 's' && name[1] == 'e') draw_settings();
     else if (name[0] == 's') draw_snake();
+    else if (name[0] == 't') draw_terminal();
 }
 
 } // namespace desktop_shell

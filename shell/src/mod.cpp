@@ -15,6 +15,12 @@ namespace {
 
 constexpr std::uint8_t SC_ESC = 0x01;
 constexpr std::uint8_t SC_S   = 0x1F;
+// Modifier scancodes (make/break pairs) for the Ctrl+Alt+T terminal
+// shortcut. The kernel keyboard driver ignores these, so the desktop loop
+// tracks the modifier state itself.
+constexpr std::uint8_t SC_CTRL_MAKE  = 0x1D;  constexpr std::uint8_t SC_CTRL_BREAK  = 0x9D;
+constexpr std::uint8_t SC_ALT_MAKE   = 0x38;  constexpr std::uint8_t SC_ALT_BREAK   = 0xB8;
+constexpr std::uint8_t SC_T_MAKE     = 0x14;
 
 // The desktop tiles -- and with them the app list -- shrink when the OS is
 // already installed, since the Setup/install shortcut is no longer offered.
@@ -123,10 +129,24 @@ void run() {
     int cursor_y = static_cast<int>(surface::pixel_height() / 2);
     if (surface::graphics_available()) draw_pointer(cursor_x, cursor_y);
     bool left_was_down = false;
+    bool ctrl_down = false;
+    bool alt_down = false;
 
     while (true) {
         if (auto scancode = input::try_read_scancode()) {
             const std::uint8_t sc = *scancode;
+            // Track Ctrl/Alt for the Ctrl+Alt+T terminal shortcut.
+            if (sc == SC_CTRL_MAKE) { ctrl_down = true; continue; }
+            if (sc == SC_CTRL_BREAK) { ctrl_down = false; continue; }
+            if (sc == SC_ALT_MAKE) { alt_down = true; continue; }
+            if (sc == SC_ALT_BREAK) { alt_down = false; continue; }
+            if (sc == SC_T_MAKE && ctrl_down && alt_down) {
+                // Ctrl+Alt+T: open the Terminal app (same entry point the
+                // desktop tile and Start menu use).
+                launch_app("terminal", menu_open, menu, cursor_x, cursor_y);
+                if (surface::graphics_available()) draw_pointer(cursor_x, cursor_y);
+                continue;
+            }
             // Any keypress acknowledges the "install shortcut may be removed"
             // banner; it never comes back on later boots.
             if (removal_notice_visible()) {

@@ -126,8 +126,9 @@ $(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/src/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# This legacy interactive shell is not part of the booted desktop path and
-# has stale VGA references. Do not compile it into the desktop kernel image.
+# This legacy interactive shell moved to the desktop side as
+# shell/src/legacy_shell.cpp (imported from zanop-kernel/src/shell);
+# the kernel's own copy stays excluded from the desktop image.
 $(BUILD_DIR)/kernel/shell/shell.o: ; @:
 
 $(BUILD_DIR)/desktop/%.o: %.cpp

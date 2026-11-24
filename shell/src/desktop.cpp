@@ -42,6 +42,7 @@ constexpr DesktopTile TILES_NOT_INSTALLED[] = {
     {"setup",   132,  86},   // install shortcut
     {"files",   132, 174},
     {"settings",132, 262},
+    {"terminal",132, 350},
 };
 constexpr DesktopTile TILES_INSTALLED[] = {
     {"clock",    32,  86},
@@ -50,6 +51,7 @@ constexpr DesktopTile TILES_INSTALLED[] = {
     {"notes",    32, 350},
     {"files",   132,  86},
     {"settings",132, 174},
+    {"terminal",132, 262},
 };
 
 // Icon + label for one app, matched by the same string the tile table uses.
@@ -61,6 +63,7 @@ const std::uint8_t* icon_for_app(const char* app) {
     if (app[0] == 's' && app[1] == 'n') return ICON_SNAKE_RGB;
     if (app[0] == 'n') return ICON_NOTES_RGB;
     if (app[0] == 'f') return ICON_FILE_EXPLORER_RGB;
+    if (app[0] == 't') return ICON_LAUNCHER_RGB;
     return ICON_SETUP_RGB;
 }
 
@@ -70,6 +73,7 @@ const char* label_for_app(const char* app) {
     if (app[0] == 's' && app[1] == 'n') return "SNAKE";
     if (app[0] == 'n') return "NOTES";
     if (app[0] == 'f') return "FILES";
+    if (app[0] == 't') return "TERMINAL";
     if (app[0] == 's' && app[1] == 'e') return "SETUP";
     return "SETTINGS";
 }
@@ -186,10 +190,10 @@ const char* const* desktop_apps(std::size_t& count) {
     // needs "every app, once each" -- tile order is what the pointer hit-test
     // in mod.cpp walks.
     static const char* not_installed[] = {
-        "clock", "calc", "snake", "notes", "setup", "files", "settings"
+        "clock", "calc", "snake", "notes", "setup", "files", "settings", "terminal"
     };
     static const char* installed[] = {
-        "clock", "calc", "snake", "notes", "files", "settings"
+        "clock", "calc", "snake", "notes", "files", "settings", "terminal"
     };
     if (install_shortcut_removed) {
         count = sizeof(installed) / sizeof(installed[0]);
