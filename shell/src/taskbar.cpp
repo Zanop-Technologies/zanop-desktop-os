@@ -1,4 +1,5 @@
 #include "taskbar.hpp"
+#include "wifi.hpp"
 #include "../../compositor/src/surface.hpp"
 #include "../../input/src/input.hpp"
 #include "embedded_icons.hpp"
@@ -21,6 +22,28 @@ void draw_top_bar() {
         surface::draw_rgb_bitmap(18, 1, ICON_SIZE, ICON_SIZE, ICON_LAUNCHER_RGB);
         surface::draw_text(64, 15, "ZANOP", {238, 245, 248}, 2);
         surface::draw_text(190, 18, "FILE   VIEW   APPS   SYSTEM", {165, 184, 193}, 1);
+        if (width >= 800) {
+            const wifi::Manager& net = wifi::manager();
+            char text[32];
+            std::size_t n = 0;
+            const char* lead = net.connected() ? "WIFI " : "WIFI NOT CONNECTED";
+            for (std::size_t i = 0; lead[i]; ++i) text[n++] = lead[i];
+            if (net.connected()) {
+                for (std::size_t i = 0; net.connected_ssid()[i] && n < 22; ++i)
+                    text[n++] = net.connected_ssid()[i];
+                text[n++] = ' ';
+                int s = net.connected_signal();
+                if (s >= 100) { text[n++] = '1'; text[n++] = '0'; text[n++] = '0'; }
+                else {
+                    if (s >= 10) text[n++] = static_cast<char>('0' + s / 10);
+                    text[n++] = static_cast<char>('0' + s % 10);
+                }
+            }
+            text[n] = '\0';
+            surface::draw_text(width - 270, 18, text,
+                               net.connected() ? surface::Color{83, 220, 206}
+                                               : surface::Color{165, 184, 193}, 1);
+        }
         surface::draw_text(width > 100 ? width - 92 : 8, 18, "READY", {83, 220, 206}, 1);
         const char* mouse_status = "MOUSE OK";
         switch (input::mouse_init_error()) {

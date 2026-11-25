@@ -82,6 +82,7 @@ void run() {
     // shows (and clicks work) on the desktop and inside every app.
     pointer::center();
     pointer::install();
+    wifi_startup();
     draw_background();
     draw_top_bar();
     draw_bottom_bar();
