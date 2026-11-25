@@ -3,6 +3,7 @@
 #include "taskbar.hpp"
 #include "launcher.hpp"
 #include "apps_gui.hpp"
+#include "pointer.hpp"
 #include "../../compositor/src/window.hpp"
 #include "../../compositor/src/surface.hpp"
 #include "../../input/src/input.hpp"
@@ -25,50 +26,7 @@ constexpr std::uint8_t SC_T_MAKE     = 0x14;
 // The desktop tiles -- and with them the app list -- shrink when the OS is
 // already installed, since the Setup/install shortcut is no longer offered.
 constexpr std::size_t ICON_SPAN = 56;
-constexpr std::size_t POINTER_WIDTH = 12;
-constexpr std::size_t POINTER_HEIGHT = 16;
-std::uint32_t pointer_underlay[POINTER_WIDTH * POINTER_HEIGHT];
-bool pointer_visible = false;
-int pointer_x = 0;
-int pointer_y = 0;
-
 void redraw(bool menu_open, compositor::Window* menu);
-
-void erase_pointer() {
-    if (!pointer_visible) return;
-    for (std::size_t y = 0; y < POINTER_HEIGHT; ++y) {
-        for (std::size_t x = 0; x < POINTER_WIDTH; ++x) {
-            surface::draw_pixel_raw(static_cast<std::size_t>(pointer_x) + x,
-                                    static_cast<std::size_t>(pointer_y) + y,
-                                    pointer_underlay[y * POINTER_WIDTH + x]);
-        }
-    }
-    pointer_visible = false;
-}
-
-void draw_pointer(int x, int y) {
-    pointer_x = x;
-    pointer_y = y;
-    for (std::size_t row = 0; row < POINTER_HEIGHT; ++row) {
-        for (std::size_t column = 0; column < POINTER_WIDTH; ++column) {
-            pointer_underlay[row * POINTER_WIDTH + column] = surface::read_pixel_raw(
-                static_cast<std::size_t>(x) + column,
-                static_cast<std::size_t>(y) + row);
-        }
-    }
-    surface::fill_pixel_rect(static_cast<std::size_t>(x), static_cast<std::size_t>(y),
-                             12, 16, {5, 15, 22});
-    surface::fill_pixel_rect(static_cast<std::size_t>(x + 2), static_cast<std::size_t>(y + 2),
-                             8, 12, {244, 248, 242});
-    surface::fill_pixel_rect(static_cast<std::size_t>(x + 4), static_cast<std::size_t>(y + 8),
-                             4, 2, {83, 220, 206});
-    pointer_visible = true;
-    // The pointer is drawn after the desktop has already been flipped, so it
-    // needs its own present(). Without this the cursor landed in the back
-    // buffer and stayed invisible until something else happened to push a
-    // frame out.
-    if (surface::graphics_available()) surface::present();
-}
 
 const char* app_at(int x, int y) {
     // Reads the same tile table the desktop painter uses, so removing the
@@ -86,21 +44,23 @@ const char* app_at(int x, int y) {
     return nullptr;
 }
 
-void launch_app(const char* app, bool& menu_open, compositor::Window& menu,
-                int cursor_x, int cursor_y) {
+void launch_app(const char* app, bool& menu_open, compositor::Window& menu) {
     menu_open = false;
     redraw(menu_open, &menu);
     if (app[0] == 's' && app[1] == 'e' && app[2] == 't' &&
-        app[3] == 'u' && app[4] == 'p') installer::run_graphical();
+        app[3] == 'u' && app[4] == 'p') {
+        // Setup draws and tracks its own pointer; keep ours out of the way.
+        pointer::enabled = false;
+        installer::run_graphical();
+        pointer::enabled = true;
+        pointer::left_down = false; // Setup consumed the button events itself
+    }
     else if (surface::graphics_available()) run_graphical_app(app);
     else Apps::launch(app);
     redraw(menu_open, &menu);
-    (void)cursor_x;
-    (void)cursor_y;
 }
 
 void redraw(bool menu_open, compositor::Window* menu) {
-    pointer_visible = false;
     VGA::writer.clear_screen();
     draw_background();
     draw_top_bar();
@@ -118,6 +78,10 @@ void run() {
     // Before the first paint: an installed system must not offer the install
     // shortcut, and wants the "may be removed" banner for this boot only.
     detect_installation();
+    // From here on the pointer is composited after every present(), so it
+    // shows (and clicks work) on the desktop and inside every app.
+    pointer::center();
+    pointer::install();
     draw_background();
     draw_top_bar();
     draw_bottom_bar();
@@ -125,16 +89,34 @@ void run() {
 
     bool menu_open = false;
     compositor::Window menu = make_start_menu(); // constructed once, reused
-    int cursor_x = static_cast<int>(surface::pixel_width() / 2);
-    int cursor_y = static_cast<int>(surface::pixel_height() / 2);
-    if (surface::graphics_available()) draw_pointer(cursor_x, cursor_y);
-    bool left_was_down = false;
     bool ctrl_down = false;
     bool alt_down = false;
 
     while (true) {
         if (auto scancode = input::try_read_scancode()) {
             const std::uint8_t sc = *scancode;
+            if (sc == input::SC_MOUSE_CLICK) {
+                const int click_x = input::last_click_x();
+                const int click_y = input::last_click_y();
+                const std::size_t screen_height = surface::pixel_height();
+                const bool start_clicked = click_x >= 18 && click_x < 134 &&
+                    click_y >= static_cast<int>(screen_height > 56 ? screen_height - 46 : 0) &&
+                    click_y < static_cast<int>(screen_height > 10 ? screen_height - 10 : screen_height);
+                if (start_clicked) {
+                    menu_open = !menu_open;
+                    if (menu_open) menu = make_start_menu();
+                    redraw(menu_open, &menu);
+                } else if (menu_open) {
+                    if (const char* app = app_for_pointer(
+                            static_cast<std::size_t>(click_x),
+                            static_cast<std::size_t>(click_y))) {
+                        launch_app(app, menu_open, menu);
+                    }
+                } else if (const char* app = app_at(click_x, click_y)) {
+                    launch_app(app, menu_open, menu);
+                }
+                continue;
+            }
             // Track Ctrl/Alt for the Ctrl+Alt+T terminal shortcut.
             if (sc == SC_CTRL_MAKE) { ctrl_down = true; continue; }
             if (sc == SC_CTRL_BREAK) { ctrl_down = false; continue; }
@@ -143,8 +125,7 @@ void run() {
             if (sc == SC_T_MAKE && ctrl_down && alt_down) {
                 // Ctrl+Alt+T: open the Terminal app (same entry point the
                 // desktop tile and Start menu use).
-                launch_app("terminal", menu_open, menu, cursor_x, cursor_y);
-                if (surface::graphics_available()) draw_pointer(cursor_x, cursor_y);
+                launch_app("terminal", menu_open, menu);
                 continue;
             }
             // Any keypress acknowledges the "install shortcut may be removed"
@@ -157,60 +138,16 @@ void run() {
                 menu = make_start_menu();
                 menu_open = true;
                 redraw(menu_open, &menu);
-                if (surface::graphics_available()) draw_pointer(cursor_x, cursor_y);
             } else if (sc == SC_ESC && menu_open) {
                 menu_open = false;
                 redraw(menu_open, &menu);
-                if (surface::graphics_available()) draw_pointer(cursor_x, cursor_y);
             } else if (menu_open) {
                 if (auto ascii = input::scancode_to_ascii(sc)) {
                     if (const char* app = app_for_key(*ascii)) {
-                        launch_app(app, menu_open, menu, cursor_x, cursor_y);
-                        if (surface::graphics_available()) draw_pointer(cursor_x, cursor_y);
+                        launch_app(app, menu_open, menu);
                     }
                 }
             }
-        }
-
-        while (auto event = input::try_read_mouse_event()) {
-            erase_pointer();
-            const int max_x = surface::pixel_width() > 12
-                ? static_cast<int>(surface::pixel_width() - 12) : 0;
-            const int max_y = surface::pixel_height() > 16
-                ? static_cast<int>(surface::pixel_height() - 16) : 0;
-            const int next_x = cursor_x + (*event).delta_x;
-            const int next_y = cursor_y + (*event).delta_y;
-            cursor_x = next_x < 0 ? 0 : (next_x > max_x ? max_x : next_x);
-            cursor_y = next_y < 0 ? 0 : (next_y > max_y ? max_y : next_y);
-
-            const bool left_down = ((*event).buttons & 0x01) != 0;
-            if (left_down && !left_was_down) {
-                const std::size_t screen_height = surface::pixel_height();
-                const bool start_clicked = cursor_x >= 18 && cursor_x < 134 &&
-                    cursor_y >= static_cast<int>(screen_height > 56 ? screen_height - 46 : 0) &&
-                    cursor_y < static_cast<int>(screen_height > 10 ? screen_height - 10 : screen_height);
-                if (start_clicked) {
-                    menu_open = !menu_open;
-                    if (menu_open) menu = make_start_menu();
-                    redraw(menu_open, &menu);
-                } else if (menu_open) {
-                    if (const char* app = app_for_pointer(
-                            static_cast<std::size_t>(cursor_x),
-                            static_cast<std::size_t>(cursor_y))) {
-                        launch_app(app, menu_open, menu, cursor_x, cursor_y);
-                    }
-                } else if (!menu_open) {
-                    if (const char* app = app_at(cursor_x, cursor_y)) {
-                        launch_app(app, menu_open, menu, cursor_x, cursor_y);
-                    }
-                }
-            }
-            left_was_down = left_down;
-            if (surface::graphics_available()) draw_pointer(cursor_x, cursor_y);
-            // draw_pointer() presents the frame itself, since the pointer is
-            // drawn on top of an already-flipped desktop. Doing it here
-            // rather than per-draw call is what keeps mouse motion free
-            // of flicker.
         }
 
         __asm__ volatile("pause");

@@ -41,6 +41,12 @@ constexpr std::size_t text_height(std::size_t scale) { return 12 * scale; }
 // copies the finished frame out -- that is what removes the tearing /
 // flicker you would otherwise get from drawing straight to the display.
 void present();
+// Copies just this rectangle of the back buffer to the display (clipped to the
+// screen). Cheap way to show a small change, e.g. the mouse pointer.
+void present_rect(std::size_t x, std::size_t y, std::size_t width, std::size_t height);
+// `hook` runs after every present()/present_rect() (not re-entered if it flips
+// itself). The shell uses it to draw the mouse pointer on top of any app.
+void set_present_hook(void (*hook)());
 bool double_buffered();
 
 bool graphics_available();

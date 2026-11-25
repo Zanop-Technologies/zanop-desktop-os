@@ -2,6 +2,7 @@
 #include "desktop.hpp"
 #include "taskbar.hpp"
 #include "legacy_shell.hpp"
+#include "pointer.hpp"
 #include "../../compositor/src/surface.hpp"
 #include "../../input/src/input.hpp"
 #include "../../../zanop-kernel/src/fs/fs.hpp"
@@ -87,6 +88,11 @@ bool is_system_path(const char* path) {
     return true;
 }
 
+bool in_rect(int px, int py, std::size_t x, std::size_t y, std::size_t w, std::size_t h) {
+    return px >= static_cast<int>(x) && px < static_cast<int>(x + w) &&
+           py >= static_cast<int>(y) && py < static_cast<int>(y + h);
+}
+
 AppFrame draw_frame(const char* title, const char* subtitle) {
     const std::size_t screen_width = surface::pixel_width();
     const std::size_t screen_height = surface::pixel_height();
@@ -110,6 +116,29 @@ AppFrame draw_frame(const char* title, const char* subtitle) {
     // apps drew into the back buffer and the user saw nothing at all.
     surface::present();
     return frame;
+}
+
+// True if `code` is a mouse click on the red close square draw_frame() paints
+// (with a more forgiving hit area). Every app treats it like pressing ESC to leave.
+bool is_close_click(const AppFrame& frame, std::uint8_t code) {
+    return code == input::SC_MOUSE_CLICK &&
+           in_rect(input::last_click_x(), input::last_click_y(),
+                   frame.x + frame.width - 46, frame.y + 8, 40, 40);
+}
+
+// Busy-waits about `spins` pause instructions, but looks at the keyboard and
+// mouse every few hundred of them, so the pointer keeps moving smoothly in apps
+// that animate on a timer (a single long uninterrupted delay made it jump).
+// Returns a key press or mouse click as soon as one arrives, else nullopt.
+std::optional<std::uint8_t> wait_for_input(unsigned spins) {
+    constexpr unsigned CHUNK = 1500;
+    while (true) {
+        const unsigned n = spins > CHUNK ? CHUNK : spins;
+        for (unsigned i = 0; i < n; ++i) __asm__ volatile("pause");
+        spins -= n;
+        if (auto code = input::try_read_scancode()) return code;
+        if (spins == 0) return std::nullopt;
+    }
 }
 
 void draw_clock() {
@@ -141,11 +170,8 @@ void draw_clock() {
             surface::present();
         }
 
-        for (unsigned delay = 0; delay < 300000; ++delay) {
-            __asm__ volatile("pause");
-        }
-        auto code = input::try_read_scancode();
-        if (code && *code == 0x01) return;
+        auto code = wait_for_input(300000);
+        if (code && (*code == 0x01 || is_close_click(frame, *code))) return;
         if (code) input::scancode_to_ascii(*code);
     }
 }
@@ -223,7 +249,7 @@ void draw_calculator() {
 
         surface::present();
         std::uint8_t code = input::read_scancode();
-        if (code == 0x01) return;
+        if (code == 0x01 || is_close_click(frame, code)) return;
         auto character = input::scancode_to_ascii(code);
         if (!character) continue;
         if (*character == '\n') {
@@ -291,7 +317,7 @@ void draw_notes() {
 
         std::uint8_t code = input::read_scancode();
         if (saved) return;
-        if (code == 0x01) {
+        if (code == 0x01 || is_close_click(frame, code)) {
             note[length] = '\0';
             FS::create_file("/home/Documents/note.txt", note);
             saved = true;
@@ -361,9 +387,8 @@ void draw_snake() {
     draw_score();
     while (true) {
 
-        for (unsigned delay = 0; delay < 700000; ++delay) __asm__ volatile("pause");
-        auto code = input::try_read_scancode();
-        if (code && *code == 0x01) return;
+        auto code = wait_for_input(700000);
+        if (code && (*code == 0x01 || is_close_click(frame, *code))) return;
 
         if (game_over) {
             if (code) {
@@ -544,6 +569,7 @@ void draw_file_manager() {
 
         surface::present();
         const std::uint8_t scancode = input::read_scancode();
+        if (is_close_click(frame, scancode)) return;
         if (scancode == 0x01) {
             if (previewing) previewing = false;
             else if (current_directory[0] == '/' && current_directory[1] == '\0') return;
@@ -727,7 +753,7 @@ void draw_terminal() {
 
     while (true) {
         const std::uint8_t scancode = input::read_scancode();
-        if (scancode == 0x01) break; // ESC
+        if (scancode == 0x01 || is_close_click(frame, scancode)) break; // ESC or close square
         auto character = input::scancode_to_ascii(scancode);
         if (!character) continue;
         if (*character == '\b' || *character == 127) {
