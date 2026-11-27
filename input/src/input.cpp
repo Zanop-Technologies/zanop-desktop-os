@@ -4,12 +4,32 @@
 
 namespace input {
 
+namespace {
+MouseSink mouse_sink = nullptr;
+int click_x = 0;
+int click_y = 0;
+
+bool poll_mouse() {
+    return mouse_sink != nullptr && mouse_sink(click_x, click_y);
+}
+} // namespace
+
+void set_mouse_sink(MouseSink sink) { mouse_sink = sink; }
+int last_click_x() { return click_x; }
+int last_click_y() { return click_y; }
+
 std::uint8_t read_scancode() {
-    return Drivers::Keyboard::read_scancode();
+    while (true) {
+        if (auto code = Drivers::Keyboard::try_read_scancode()) return *code;
+        if (poll_mouse()) return SC_MOUSE_CLICK;
+        __asm__ volatile("hlt"); // any interrupt (keyboard, mouse, timer) wakes us
+    }
 }
 
 std::optional<std::uint8_t> try_read_scancode() {
-    return Drivers::Keyboard::try_read_scancode();
+    if (auto code = Drivers::Keyboard::try_read_scancode()) return code;
+    if (poll_mouse()) return SC_MOUSE_CLICK;
+    return std::nullopt;
 }
 
 std::optional<char> scancode_to_ascii(std::uint8_t code) {

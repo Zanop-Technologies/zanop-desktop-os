@@ -2,6 +2,8 @@
 #include "desktop.hpp"
 #include "taskbar.hpp"
 #include "legacy_shell.hpp"
+#include "pointer.hpp"
+#include "wifi.hpp"
 #include "../../compositor/src/surface.hpp"
 #include "../../input/src/input.hpp"
 #include "../../../zanop-kernel/src/fs/fs.hpp"
@@ -87,6 +89,11 @@ bool is_system_path(const char* path) {
     return true;
 }
 
+bool in_rect(int px, int py, std::size_t x, std::size_t y, std::size_t w, std::size_t h) {
+    return px >= static_cast<int>(x) && px < static_cast<int>(x + w) &&
+           py >= static_cast<int>(y) && py < static_cast<int>(y + h);
+}
+
 AppFrame draw_frame(const char* title, const char* subtitle) {
     const std::size_t screen_width = surface::pixel_width();
     const std::size_t screen_height = surface::pixel_height();
@@ -110,6 +117,29 @@ AppFrame draw_frame(const char* title, const char* subtitle) {
     // apps drew into the back buffer and the user saw nothing at all.
     surface::present();
     return frame;
+}
+
+// True if `code` is a mouse click on the red close square draw_frame() paints
+// (with a more forgiving hit area). Every app treats it like pressing ESC to leave.
+bool is_close_click(const AppFrame& frame, std::uint8_t code) {
+    return code == input::SC_MOUSE_CLICK &&
+           in_rect(input::last_click_x(), input::last_click_y(),
+                   frame.x + frame.width - 46, frame.y + 8, 40, 40);
+}
+
+// Busy-waits about `spins` pause instructions, but looks at the keyboard and
+// mouse every few hundred of them, so the pointer keeps moving smoothly in apps
+// that animate on a timer (a single long uninterrupted delay made it jump).
+// Returns a key press or mouse click as soon as one arrives, else nullopt.
+std::optional<std::uint8_t> wait_for_input(unsigned spins) {
+    constexpr unsigned CHUNK = 1500;
+    while (true) {
+        const unsigned n = spins > CHUNK ? CHUNK : spins;
+        for (unsigned i = 0; i < n; ++i) __asm__ volatile("pause");
+        spins -= n;
+        if (auto code = input::try_read_scancode()) return code;
+        if (spins == 0) return std::nullopt;
+    }
 }
 
 void draw_clock() {
@@ -141,11 +171,8 @@ void draw_clock() {
             surface::present();
         }
 
-        for (unsigned delay = 0; delay < 300000; ++delay) {
-            __asm__ volatile("pause");
-        }
-        auto code = input::try_read_scancode();
-        if (code && *code == 0x01) return;
+        auto code = wait_for_input(300000);
+        if (code && (*code == 0x01 || is_close_click(frame, *code))) return;
         if (code) input::scancode_to_ascii(*code);
     }
 }
@@ -223,7 +250,7 @@ void draw_calculator() {
 
         surface::present();
         std::uint8_t code = input::read_scancode();
-        if (code == 0x01) return;
+        if (code == 0x01 || is_close_click(frame, code)) return;
         auto character = input::scancode_to_ascii(code);
         if (!character) continue;
         if (*character == '\n') {
@@ -291,7 +318,7 @@ void draw_notes() {
 
         std::uint8_t code = input::read_scancode();
         if (saved) return;
-        if (code == 0x01) {
+        if (code == 0x01 || is_close_click(frame, code)) {
             note[length] = '\0';
             FS::create_file("/home/Documents/note.txt", note);
             saved = true;
@@ -361,9 +388,8 @@ void draw_snake() {
     draw_score();
     while (true) {
 
-        for (unsigned delay = 0; delay < 700000; ++delay) __asm__ volatile("pause");
-        auto code = input::try_read_scancode();
-        if (code && *code == 0x01) return;
+        auto code = wait_for_input(700000);
+        if (code && (*code == 0x01 || is_close_click(frame, *code))) return;
 
         if (game_over) {
             if (code) {
@@ -544,6 +570,7 @@ void draw_file_manager() {
 
         surface::present();
         const std::uint8_t scancode = input::read_scancode();
+        if (is_close_click(frame, scancode)) return;
         if (scancode == 0x01) {
             if (previewing) previewing = false;
             else if (current_directory[0] == '/' && current_directory[1] == '\0') return;
@@ -620,30 +647,376 @@ void draw_file_manager() {
     }
 }
 
-void draw_settings() {
+
+
+// -- mouse-aware input for the Settings and Wi-Fi screens -------------------
+struct UiEvent {
+    bool is_click;
+    std::uint8_t scancode;
+    int x;
+    int y;
+};
+
+// A clickable button: filled box with a label.
+void draw_button(std::size_t x, std::size_t y, std::size_t w, const char* label) {
+    surface::fill_pixel_rect(x, y, w, 26, {208, 222, 226});
+    surface::fill_pixel_rect(x, y + 24, w, 2, TEAL);
+    surface::draw_text(x + 10, y + 7, label, INK, 1);
+}
+
+// Waits for a key press or a mouse click (the pointer is handled by the input layer).
+UiEvent wait_ui_event() {
+    const std::uint8_t code = input::read_scancode();
+    if (code == input::SC_MOUSE_CLICK) return {true, 0, input::last_click_x(), input::last_click_y()};
+    return {false, code, 0, 0};
+}
+
+bool close_clicked(const AppFrame& frame, const UiEvent& e) {
+    return e.is_click &&
+           in_rect(e.x, e.y, frame.x + frame.width - 46, frame.y + 8, 40, 40);
+}
+
+// -- WI-FI ----------------------------------------------------------------
+// Reached from Settings (key 3). The manager and its (currently simulated)
+// adapter live in wifi.hpp; this is the screen plus saving the credential
+// list to /system/WIFI.CFG.
+constexpr const char* WIFI_CONFIG_PATH = "/system/WIFI.CFG";
+
+void wifi_save() {
+    char buffer[1024];
+    wifi::manager().serialize(buffer, sizeof(buffer));
+    FS::create_file(WIFI_CONFIG_PATH, buffer);
+}
+
+void wifi_load() {
+    static char buffer[1024];
+    std::size_t bytes = 0;
+    if (FS::read_file(WIFI_CONFIG_PATH, reinterpret_cast<std::uint8_t*>(buffer),
+                      sizeof(buffer), bytes)) {
+        wifi::manager().load(buffer, bytes);
+    }
+}
+
+void wifi_draw_bars(std::size_t x, std::size_t y, int signal) {
+    const int thresholds[4] = {15, 35, 55, 75};
+    for (int bar = 0; bar < 4; ++bar) {
+        const std::size_t h = 4 + static_cast<std::size_t>(bar) * 4;
+        surface::fill_pixel_rect(x + static_cast<std::size_t>(bar) * 7, y + 16 - h, 5, h,
+                                 signal >= thresholds[bar] ? TEAL : Color{190, 204, 210});
+    }
+}
+
+std::size_t wifi_put_number(char* out, std::size_t pos, int value) {
+    if (value < 0) value = 0;
+    char digits[8];
+    std::size_t n = 0;
+    do { digits[n++] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
+    while (n) out[pos++] = digits[--n];
+    return pos;
+}
+
+enum class WifiMode { List, Password, Forget };
+
+void draw_wifi() {
+    wifi::Manager& manager = wifi::manager();
+    manager.refresh();
+    if (manager.take_dirty()) wifi_save();
+
+    WifiMode mode = WifiMode::List;
+    char message[72];
+    clear_text(message, sizeof(message));
+    bool message_is_error = false;
+    char target[wifi::MAX_SSID + 1];
+    clear_text(target, sizeof(target));
+    char password[wifi::MAX_PASSPHRASE + 1];
+    std::size_t password_len = 0;
+    password[0] = '\0';
+    constexpr std::size_t VISIBLE = 8;
+
+    auto set_message = [&](const char* text, bool error) {
+        std::size_t i = 0;
+        for (; text[i] && i + 1 < sizeof(message); ++i) message[i] = text[i];
+        message[i] = '\0';
+        message_is_error = error;
+    };
+    auto finish_connect = [&](wifi::Error e, const char* ssid) {
+        if (e == wifi::Error::None) {
+            char text[72];
+            std::size_t pos = 0;
+            const char prefix[] = "CONNECTED TO ";
+            for (std::size_t i = 0; prefix[i]; ++i) text[pos++] = prefix[i];
+            for (std::size_t i = 0; ssid[i] && pos + 1 < sizeof(text); ++i) text[pos++] = ssid[i];
+            text[pos] = '\0';
+            set_message(text, false);
+        } else {
+            set_message(wifi::error_text(e), true);
+        }
+        if (manager.take_dirty()) wifi_save();
+    };
+
     while (true) {
-        AppFrame frame = draw_frame("SETTINGS", "DESKTOP APPEARANCE - THIS SESSION");
-        const bool warm = warm_theme_enabled();
-        surface::fill_pixel_rect(frame.x + 32, frame.y + 132,
-                                 frame.width - 64, 64,
-                                 warm ? Color{102, 65, 63} : Color{18, 86, 91});
-        surface::draw_text(frame.x + 54, frame.y + 156,
-                           warm ? "CURRENT THEME: EMBER" : "CURRENT THEME: OCEAN",
-                           {238, 245, 248}, 1);
-        surface::draw_text(frame.x + 54, frame.y + 236,
-                           "1  OCEAN", INK, 2);
-        surface::draw_text(frame.x + 54, frame.y + 286,
-                           "2  EMBER", INK, 2);
-        surface::draw_text(frame.x + 54, frame.y + 356,
-                           "THE CHANGE APPLIES WHEN YOU RETURN TO THE DESKTOP", MUTED, 1);
+        const char* subtitle = mode == WifiMode::Password ? "ENTER THE NETWORK PASSWORD"
+                             : mode == WifiMode::Forget ? "FORGET A SAVED NETWORK"
+                             : "WI-FI NETWORKS";
+        AppFrame frame = draw_frame("WI-FI", subtitle);
+
+        // Status banner.
+        const bool up = manager.connected();
+        surface::fill_pixel_rect(frame.x + 28, frame.y + 96, frame.width - 56, 40,
+                                 up ? Color{18, 86, 91} : Color{86, 98, 106});
+        char status[64];
+        std::size_t pos = 0;
+        const char* lead = up ? "CONNECTED  " : "NOT CONNECTED";
+        for (std::size_t i = 0; lead[i]; ++i) status[pos++] = lead[i];
+        if (up) {
+            for (std::size_t i = 0; manager.connected_ssid()[i] && pos < 44; ++i)
+                status[pos++] = manager.connected_ssid()[i];
+            const char sig[] = "  SIGNAL ";
+            for (std::size_t i = 0; sig[i]; ++i) status[pos++] = sig[i];
+            pos = wifi_put_number(status, pos, manager.connected_signal());
+        }
+        status[pos] = '\0';
+        surface::draw_text(frame.x + 44, frame.y + 111, status, {238, 245, 248}, 1);
+        if (up) wifi_draw_bars(frame.x + frame.width - 90, frame.y + 104, manager.connected_signal());
+
+        if (mode == WifiMode::Password) {
+            surface::draw_text(frame.x + 32, frame.y + 160, "NETWORK", MUTED, 1);
+            surface::draw_text(frame.x + 32, frame.y + 178, target, INK, 2);
+            surface::draw_text(frame.x + 32, frame.y + 222, "PASSWORD", MUTED, 1);
+            surface::fill_pixel_rect(frame.x + 32, frame.y + 240, frame.width - 64, 30,
+                                     {250, 249, 239});
+            char masked[wifi::MAX_PASSPHRASE + 1];
+            for (std::size_t i = 0; i < password_len; ++i) masked[i] = '*';
+            masked[password_len] = '\0';
+            surface::draw_text(frame.x + 42, frame.y + 248, masked, INK, 1);
+            surface::fill_pixel_rect(frame.x + 42 + password_len * 6, frame.y + 246, 2, 14, TEAL);
+            surface::draw_text(frame.x + 32, frame.y + 284,
+                               "8 TO 63 CHARACTERS", MUTED, 1);
+            if (message[0]) surface::draw_text(frame.x + 32, frame.y + 312, message,
+                                               message_is_error ? CORAL : TEAL, 1);
+            draw_button(frame.x + 32, frame.y + 336, 120, "CONNECT");
+            draw_button(frame.x + 164, frame.y + 336, 120, "CANCEL");
+            surface::draw_text(frame.x + 32, frame.y + 372,
+                               "ENTER CONNECT   BACKSPACE DELETE   ESC CANCEL", MUTED, 1);
+        } else if (mode == WifiMode::Forget) {
+            if (manager.saved_count() == 0)
+                surface::draw_text(frame.x + 32, frame.y + 168, "NO SAVED NETWORKS", MUTED, 1);
+            for (std::size_t i = 0; i < manager.saved_count() && i < VISIBLE; ++i) {
+                char row[48];
+                std::size_t p = 0;
+                row[p++] = static_cast<char>('1' + i);
+                row[p++] = ' ';
+                row[p++] = ' ';
+                for (std::size_t k = 0; manager.saved(i).ssid[k] && p < 46; ++k)
+                    row[p++] = manager.saved(i).ssid[k];
+                row[p] = '\0';
+                surface::draw_text(frame.x + 32, frame.y + 160 + i * 24, row, INK, 1);
+            }
+            draw_button(frame.x + 32, frame.y + 336, 120, "BACK");
+            surface::draw_text(frame.x + 32, frame.y + 372,
+                               "CLICK OR PRESS A NUMBER TO FORGET   ESC BACK", MUTED, 1);
+        } else {
+            if (!manager.adapter_present()) {
+                surface::draw_text(frame.x + 32, frame.y + 160, wifi::error_text(wifi::Error::NoAdapter),
+                                   CORAL, 1);
+            } else if (manager.network_count() == 0) {
+                surface::draw_text(frame.x + 32, frame.y + 160, "NO NETWORKS FOUND - PRESS R", MUTED, 1);
+            }
+            for (std::size_t i = 0; i < manager.network_count() && i < VISIBLE; ++i) {
+                const wifi::Network& net = manager.network(i);
+                const std::size_t y = frame.y + 150 + i * 24;
+                const bool active = up && wifi::detail::same(net.ssid, manager.connected_ssid());
+                if (active) surface::fill_pixel_rect(frame.x + 24, y - 4, frame.width - 48, 22,
+                                                     {208, 232, 232});
+                char num[3] = {static_cast<char>('1' + i), '\0', '\0'};
+                surface::draw_text(frame.x + 32, y, num, MUTED, 1);
+                surface::draw_text(frame.x + 54, y, net.ssid, INK, 1);
+                surface::draw_text(frame.x + 270, y,
+                                   net.security == wifi::Security::Wpa2 ? "WPA2" : "OPEN",
+                                   MUTED, 1);
+                wifi_draw_bars(frame.x + 336, y - 3, net.signal);
+                char pct[6];
+                const std::size_t p = wifi_put_number(pct, 0, net.signal);
+                pct[p] = '\0';
+                surface::draw_text(frame.x + 372, y, pct, INK, 1);
+                if (active) surface::draw_text(frame.x + 430, y, "CONNECTED", TEAL, 1);
+                else if (manager.is_saved(net.ssid)) surface::draw_text(frame.x + 430, y, "SAVED", MUTED, 1);
+            }
+            if (message[0]) surface::draw_text(frame.x + 32, frame.y + 350, message,
+                                               message_is_error ? CORAL : TEAL, 1);
+            draw_button(frame.x + 32, frame.y + 372, 130, "R  REFRESH");
+            draw_button(frame.x + 174, frame.y + 372, 150, "D  DISCONNECT");
+            draw_button(frame.x + 336, frame.y + 372, 120, "F  FORGET");
+            if (manager.backend() && manager.backend()->simulated)
+                surface::draw_text(frame.x + frame.width - 190, frame.y + frame.height - 25,
+                                   "SIMULATED ADAPTER", CORAL, 1);
+            if (!FS::is_mounted())
+                surface::draw_text(frame.x + 100, frame.y + frame.height - 25,
+                                   "NO DISK - NOT SAVED", CORAL, 1);
+        }
         surface::present();
 
-        const std::uint8_t scancode = input::read_scancode();
-        if (scancode == 0x01) return;
-        auto character = input::scancode_to_ascii(scancode);
-        if (!character) continue;
-        if (*character == '1') set_warm_theme(false);
-        else if (*character == '2') set_warm_theme(true);
+        const UiEvent event = wait_ui_event();
+        bool escape = false;
+        char c = 0;
+        if (event.is_click) {
+            // Translate a click into the key it stands for.
+            if (close_clicked(frame, event)) {
+                escape = true;
+            } else if (mode == WifiMode::Password) {
+                if (in_rect(event.x, event.y, frame.x + 32, frame.y + 336, 120, 26)) c = '\n';
+                else if (in_rect(event.x, event.y, frame.x + 164, frame.y + 336, 120, 26)) escape = true;
+            } else if (mode == WifiMode::Forget) {
+                if (in_rect(event.x, event.y, frame.x + 32, frame.y + 336, 120, 26)) escape = true;
+                for (std::size_t i = 0; i < manager.saved_count() && i < VISIBLE; ++i)
+                    if (in_rect(event.x, event.y, frame.x + 24, frame.y + 156 + i * 24,
+                                frame.width - 48, 22))
+                        c = static_cast<char>('1' + i);
+            } else {
+                for (std::size_t i = 0; i < manager.network_count() && i < VISIBLE; ++i)
+                    if (in_rect(event.x, event.y, frame.x + 24, frame.y + 146 + i * 24,
+                                frame.width - 48, 22))
+                        c = static_cast<char>('1' + i);
+                if (in_rect(event.x, event.y, frame.x + 32, frame.y + 372, 130, 26)) c = 'r';
+                else if (in_rect(event.x, event.y, frame.x + 174, frame.y + 372, 150, 26)) c = 'd';
+                else if (in_rect(event.x, event.y, frame.x + 336, frame.y + 372, 120, 26)) c = 'f';
+            }
+            if (!escape && c == 0) continue; // click on nothing
+        } else if (event.scancode == 0x01) {
+            escape = true;
+        } else {
+            auto character = input::scancode_to_ascii(event.scancode);
+            if (!character) continue;
+            c = *character;
+        }
+        if (escape) {
+            if (mode == WifiMode::List) return;
+            mode = WifiMode::List;
+            set_message("", false);
+            password_len = 0;
+            password[0] = '\0';
+            continue;
+        }
+
+        if (mode == WifiMode::Password) {
+            if (c == '\b') {
+                if (password_len > 0) password[--password_len] = '\0';
+            } else if (c == '\n') {
+                const wifi::Error e = manager.connect(target, password);
+                finish_connect(e, target);
+                if (e == wifi::Error::PasswordLength) {
+                    continue; // stay here so the user can fix the length
+                }
+                mode = WifiMode::List;
+                password_len = 0;
+                password[0] = '\0';
+            } else if (c >= 32 && password_len < wifi::MAX_PASSPHRASE) {
+                password[password_len++] = c;
+                password[password_len] = '\0';
+            }
+            continue;
+        }
+
+        if (mode == WifiMode::Forget) {
+            if (c >= '1' && c <= '8') {
+                const std::size_t i = static_cast<std::size_t>(c - '1');
+                if (i < manager.saved_count()) {
+                    char name[wifi::MAX_SSID + 1];
+                    std::size_t k = 0;
+                    for (; manager.saved(i).ssid[k]; ++k) name[k] = manager.saved(i).ssid[k];
+                    name[k] = '\0';
+                    manager.forget(name);
+                    wifi_save();
+                    set_message("NETWORK FORGOTTEN", false);
+                    mode = WifiMode::List;
+                    manager.refresh();
+                }
+            }
+            continue;
+        }
+
+        if (c >= '1' && c <= '8') {
+            const std::size_t i = static_cast<std::size_t>(c - '1');
+            if (i >= manager.network_count()) continue;
+            const wifi::Network net = manager.network(i);
+            if (net.security == wifi::Security::Open || manager.is_saved(net.ssid)) {
+                finish_connect(manager.connect(net.ssid, nullptr), net.ssid);
+                // A saved password that no longer works: ask for a new one.
+                if (manager.last_error() == wifi::Error::BadPassword) {
+                    mode = WifiMode::Password;
+                    password_len = 0;
+                    password[0] = '\0';
+                    for (std::size_t k = 0; k <= wifi::MAX_SSID; ++k) target[k] = net.ssid[k];
+                }
+            } else {
+                mode = WifiMode::Password;
+                password_len = 0;
+                password[0] = '\0';
+                for (std::size_t k = 0; k <= wifi::MAX_SSID; ++k) target[k] = net.ssid[k];
+                set_message("", false);
+            }
+        } else if (c == 'r' || c == 'R') {
+            manager.refresh();
+            if (manager.take_dirty()) wifi_save();
+            set_message("LIST REFRESHED", false);
+        } else if (c == 'd' || c == 'D') {
+            const wifi::Error e = manager.disconnect();
+            if (e == wifi::Error::None) set_message("DISCONNECTED", false);
+            else set_message(wifi::error_text(e), true);
+        } else if (c == 'f' || c == 'F') {
+            mode = WifiMode::Forget;
+        }
+    }
+}
+
+void draw_settings() {
+    while (true) {
+        AppFrame frame = draw_frame("SETTINGS", "DESKTOP APPEARANCE AND NETWORK");
+        const bool warm = warm_theme_enabled();
+        surface::fill_pixel_rect(frame.x + 32, frame.y + 104, frame.width - 64, 56,
+                                 warm ? Color{102, 65, 63} : Color{18, 86, 91});
+        surface::draw_text(frame.x + 54, frame.y + 128,
+                           warm ? "CURRENT THEME: EMBER" : "CURRENT THEME: OCEAN",
+                           {238, 245, 248}, 1);
+        const std::size_t row_x = frame.x + 32;
+        const std::size_t row_w = frame.width - 64;
+        const Color row_fill{222, 233, 236};
+        surface::fill_pixel_rect(row_x, frame.y + 184, row_w, 36, row_fill);
+        surface::fill_pixel_rect(row_x, frame.y + 224, row_w, 36, row_fill);
+        surface::fill_pixel_rect(row_x, frame.y + 264, row_w, 36, row_fill);
+        surface::draw_text(frame.x + 54, frame.y + 190, "1  OCEAN", INK, 2);
+        surface::draw_text(frame.x + 54, frame.y + 230, "2  EMBER", INK, 2);
+        surface::draw_text(frame.x + 54, frame.y + 270, "3  WI-FI", INK, 2);
+        char status[64];
+        std::size_t pos = 0;
+        const char* text = wifi::manager().connected() ? "CONNECTED TO " : "NOT CONNECTED";
+        for (std::size_t i = 0; text[i]; ++i) status[pos++] = text[i];
+        if (wifi::manager().connected()) {
+            for (std::size_t i = 0; wifi::manager().connected_ssid()[i] && pos < 60; ++i)
+                status[pos++] = wifi::manager().connected_ssid()[i];
+        }
+        status[pos] = '\0';
+        surface::draw_text(frame.x + 54, frame.y + 312, status, MUTED, 1);
+        surface::draw_text(frame.x + 54, frame.y + 356,
+                           "THE THEME APPLIES WHEN YOU RETURN TO THE DESKTOP", MUTED, 1);
+        surface::present();
+
+        const UiEvent event = wait_ui_event();
+        char choice = 0;
+        if (event.is_click) {
+            if (close_clicked(frame, event)) return;
+            if (in_rect(event.x, event.y, row_x, frame.y + 184, row_w, 36)) choice = '1';
+            else if (in_rect(event.x, event.y, row_x, frame.y + 224, row_w, 36)) choice = '2';
+            else if (in_rect(event.x, event.y, row_x, frame.y + 264, row_w, 36)) choice = '3';
+        } else {
+            if (event.scancode == 0x01) return;
+            auto character = input::scancode_to_ascii(event.scancode);
+            if (!character) continue;
+            choice = *character;
+        }
+        if (choice == '1') set_warm_theme(false);
+        else if (choice == '2') set_warm_theme(true);
+        else if (choice == '3') draw_wifi();
     }
 }
 
@@ -727,7 +1100,7 @@ void draw_terminal() {
 
     while (true) {
         const std::uint8_t scancode = input::read_scancode();
-        if (scancode == 0x01) break; // ESC
+        if (scancode == 0x01 || is_close_click(frame, scancode)) break; // ESC or close square
         auto character = input::scancode_to_ascii(scancode);
         if (!character) continue;
         if (*character == '\b' || *character == 127) {
@@ -773,6 +1146,18 @@ void run_graphical_app(const char* name) {
     else if (name[0] == 's' && name[1] == 'e') draw_settings();
     else if (name[0] == 's') draw_snake();
     else if (name[0] == 't') draw_terminal();
+}
+
+} // namespace desktop_shell
+
+namespace desktop_shell {
+
+// Called once at shell startup: bring up the Wi-Fi manager, load the saved
+// networks and rejoin the strongest one that is in range.
+void wifi_startup() {
+    wifi::manager().init(&wifi::simulated_backend());
+    wifi_load();
+    wifi::manager().refresh();
 }
 
 } // namespace desktop_shell

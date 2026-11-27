@@ -12,7 +12,19 @@
 
 namespace input {
 
-std::uint8_t read_scancode();                    // blocks until a real key event
+// Pseudo-scancode returned by read_scancode()/try_read_scancode() when the
+// mouse was clicked; the position is in last_click_x()/last_click_y(). It has
+// the high bit set, so scancode_to_ascii() ignores it like a key release.
+constexpr std::uint8_t SC_MOUSE_CLICK = 0xFE;
+
+// The mouse sink is called whenever a screen waits for or polls the keyboard;
+// it moves the pointer and returns true (with the click position) on a click.
+using MouseSink = bool (*)(int& click_x, int& click_y);
+void set_mouse_sink(MouseSink sink);
+int last_click_x();
+int last_click_y();
+
+std::uint8_t read_scancode();                    // blocks until a key event or a click
 std::optional<std::uint8_t> try_read_scancode();  // non-blocking
 std::optional<char> scancode_to_ascii(std::uint8_t code);
 
